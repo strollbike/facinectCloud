@@ -57,7 +57,9 @@ CREATE TABLE IF NOT EXISTS app_cities (
   name       VARCHAR(128) NOT NULL,
   state_name VARCHAR(128) NOT NULL DEFAULT '',
   latitude   DOUBLE PRECISION NOT NULL DEFAULT 0,
-  longitude  DOUBLE PRECISION NOT NULL DEFAULT 0
+  longitude  DOUBLE PRECISION NOT NULL DEFAULT 0,
+  geohash    VARCHAR(12) NOT NULL DEFAULT '',
+  geohash5   CHAR(5) NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS app_areas (
@@ -66,6 +68,8 @@ CREATE TABLE IF NOT EXISTS app_areas (
   name       VARCHAR(128) NOT NULL,
   latitude   DOUBLE PRECISION NOT NULL DEFAULT 0,
   longitude  DOUBLE PRECISION NOT NULL DEFAULT 0,
+  geohash    VARCHAR(12) NOT NULL DEFAULT '',
+  geohash5   CHAR(5) NOT NULL DEFAULT '',
   aliases    TEXT[] NOT NULL DEFAULT '{}'
 );
 
@@ -77,6 +81,8 @@ CREATE TABLE IF NOT EXISTS app_facilities (
   logo_url        TEXT NOT NULL DEFAULT '',
   latitude        DOUBLE PRECISION NOT NULL DEFAULT 0,
   longitude       DOUBLE PRECISION NOT NULL DEFAULT 0,
+  geohash         VARCHAR(12) NOT NULL DEFAULT '',
+  geohash5        CHAR(5) NOT NULL DEFAULT '',
   customer_ok     BOOLEAN NOT NULL DEFAULT TRUE,
   maintenance     BOOLEAN NOT NULL DEFAULT FALSE,
   booking_blocked BOOLEAN NOT NULL DEFAULT FALSE,
@@ -109,10 +115,15 @@ CREATE TABLE IF NOT EXISTS app_slots (
   time_range      VARCHAR(64) NOT NULL,
   status          VARCHAR(32) NOT NULL DEFAULT 'available',
   held_by_user_id BIGINT NULL,
+  onhold_update_time TIMESTAMPTZ NULL,
   UNIQUE (facility_id, sport_id, court_name, slot_date, time_range)
 );
+ALTER TABLE app_slots ADD COLUMN IF NOT EXISTS onhold_update_time TIMESTAMPTZ NULL;
 CREATE INDEX IF NOT EXISTS idx_app_slots_lookup
   ON app_slots(facility_id, sport_id, slot_date);
+CREATE INDEX IF NOT EXISTS idx_app_slots_onhold
+  ON app_slots(facility_id, status, onhold_update_time)
+  WHERE LOWER(status)='onhold';
 
 CREATE TABLE IF NOT EXISTS app_bookings (
   id                BIGSERIAL PRIMARY KEY,
@@ -177,6 +188,19 @@ CREATE TABLE IF NOT EXISTS app_fcm_devices (
   UNIQUE (token)
 );
 
+CREATE TABLE IF NOT EXISTS app_fcm_audience_map (
+  id             BIGSERIAL PRIMARY KEY,
+  audience       VARCHAR(32) NOT NULL,
+  role_id        BIGINT NOT NULL,
+  users_user_id  BIGINT NOT NULL,
+  phone_norm     VARCHAR(20),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (audience, role_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fcm_aud_user ON app_fcm_audience_map(users_user_id);
+CREATE INDEX IF NOT EXISTS idx_fcm_aud_phone ON app_fcm_audience_map(phone_norm);
+CREATE INDEX IF NOT EXISTS idx_fcm_aud_audience ON app_fcm_audience_map(audience, role_id);
+
 CREATE TABLE IF NOT EXISTS app_notifications (
   id           BIGSERIAL PRIMARY KEY,
   user_id      BIGINT NOT NULL,
@@ -191,9 +215,26 @@ CREATE TABLE IF NOT EXISTS app_notifications (
   source       VARCHAR(32) NOT NULL DEFAULT 'user',
   meta_json    JSONB NOT NULL DEFAULT '{}',
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  expires_at   TIMESTAMPTZ NULL
+  expires_at   TIMESTAMPTZ NULL,
+  deleted_at   TIMESTAMPTZ NULL
 );
 CREATE INDEX IF NOT EXISTS idx_app_notif_user ON app_notifications(user_id, created_at DESC);
+ALTER TABLE app_notifications ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL;
+
+-- Geohash for proximity Nearby (precision 6 + coarse 5).
+ALTER TABLE app_facilities ADD COLUMN IF NOT EXISTS geohash VARCHAR(12) NOT NULL DEFAULT '';
+ALTER TABLE app_facilities ADD COLUMN IF NOT EXISTS geohash5 CHAR(5) NOT NULL DEFAULT '';
+ALTER TABLE app_areas ADD COLUMN IF NOT EXISTS geohash VARCHAR(12) NOT NULL DEFAULT '';
+ALTER TABLE app_areas ADD COLUMN IF NOT EXISTS geohash5 CHAR(5) NOT NULL DEFAULT '';
+ALTER TABLE app_cities ADD COLUMN IF NOT EXISTS geohash VARCHAR(12) NOT NULL DEFAULT '';
+ALTER TABLE app_cities ADD COLUMN IF NOT EXISTS geohash5 CHAR(5) NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_app_facilities_geohash5 ON app_facilities (geohash5);
+CREATE INDEX IF NOT EXISTS idx_app_facilities_geohash ON app_facilities (geohash);
+CREATE INDEX IF NOT EXISTS idx_app_areas_geohash5 ON app_areas (geohash5);
+CREATE INDEX IF NOT EXISTS idx_app_notif_user_active
+  ON app_notifications(user_id, created_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_app_notif_deleted_at
+  ON app_notifications(deleted_at) WHERE deleted_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS app_score_follows (
   id          BIGSERIAL PRIMARY KEY,
@@ -226,6 +267,26 @@ CREATE TABLE IF NOT EXISTS app_fee_bills (
   display_name    VARCHAR(191) NOT NULL DEFAULT '',
   transaction_id  VARCHAR(128) NOT NULL DEFAULT '',
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS fee_bills (
+  id              BIGSERIAL PRIMARY KEY,
+  facility_id     BIGINT NOT NULL,
+  user_id         BIGINT NOT NULL DEFAULT 0,
+  contact_phone   VARCHAR(32) NOT NULL DEFAULT '',
+  bill_type       VARCHAR(32) NOT NULL DEFAULT 'student',
+  enrollment_id   BIGINT NOT NULL DEFAULT 0,
+  bill_amount     NUMERIC(12,2) NOT NULL DEFAULT 0,
+  paid_amount     NUMERIC(12,2) NOT NULL DEFAULT 0,
+  billing_month   VARCHAR(16) NOT NULL DEFAULT '',
+  due_date        DATE NULL,
+  payment_status  VARCHAR(32) NOT NULL DEFAULT 'pending',
+  plan_name       VARCHAR(128) NOT NULL DEFAULT '',
+  display_name    VARCHAR(191) NOT NULL DEFAULT '',
+  transaction_id  VARCHAR(128) NOT NULL DEFAULT '',
+  payment_method  VARCHAR(32) NOT NULL DEFAULT '',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS app_student_enrollments (

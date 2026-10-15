@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -247,8 +248,11 @@ func (s *Service) FacilitiesNearby(ctx context.Context, body map[string]any) (bo
 			list = append(list, map[string]any{"sportId": id, "sportName": name})
 		}
 		return true, "OK", map[string]any{"sports": list}
-	case "cities", "all_cities":
+	case "cities":
 		return s.citiesPayload(ctx)
+	case "all_cities":
+		// City-wide facilities sorted by distance (Proximity city browse).
+		return s.facilitiesCityDistance(ctx, body)
 	case "facility_sports":
 		fid, _ := strconv.ParseInt(fmt.Sprint(body["facilityId"]), 10, 64)
 		rows, err := s.DB.QueryContext(ctx, `
@@ -279,8 +283,10 @@ WHERE fs.facility_id=$1 ORDER BY s.name`, fid)
 		if q == "" {
 			q = strField(body, "city")
 		}
+		sportsByFac := s.allFacilitySportsMap(ctx)
 		rows, err := s.DB.QueryContext(ctx, `
 SELECT f.id, f.name, f.location, f.city_name, f.logo_url, f.latitude, f.longitude,
+       COALESCE(f.geohash,''), COALESCE(f.geohash5,''),
        f.customer_ok, f.maintenance
 FROM app_facilities f WHERE f.status='active'`)
 		if err != nil {
@@ -290,10 +296,10 @@ FROM app_facilities f WHERE f.status='active'`)
 		out := []map[string]any{}
 		for rows.Next() {
 			var id int64
-			var name, loc, city, logo string
+			var name, loc, city, logo, ghash, ghash5 string
 			var flat, flon float64
 			var custOK, maint bool
-			_ = rows.Scan(&id, &name, &loc, &city, &logo, &flat, &flon, &custOK, &maint)
+			_ = rows.Scan(&id, &name, &loc, &city, &logo, &flat, &flon, &ghash, &ghash5, &custOK, &maint)
 			dist := 0.0
 			if lat != 0 || lon != 0 {
 				dist = haversineKm(lat, lon, flat, flon)
@@ -309,7 +315,10 @@ FROM app_facilities f WHERE f.status='active'`)
 					continue
 				}
 			}
-			sports := s.facilitySports(ctx, id)
+			sports := sportsByFac[id]
+			if sports == nil {
+				sports = []map[string]any{}
+			}
 			if sportID > 0 {
 				ok := false
 				for _, sp := range sports {
@@ -323,23 +332,142 @@ FROM app_facilities f WHERE f.status='active'`)
 				}
 			}
 			out = append(out, map[string]any{
-				"facilityId":               id,
-				"facilityName":             name,
-				"location":                 loc,
-				"cityName":                 city,
-				"facilityLogoUrl":          logo,
-				"latitude":                 flat,
-				"longitude":                flon,
-				"distanceKm":               math.Round(dist*10) / 10,
-				"sports":                   sports,
+				"facilityId":                id,
+				"facilityName":              name,
+				"location":                  loc,
+				"cityName":                  city,
+				"facilityLogoUrl":           logo,
+				"latitude":                  flat,
+				"longitude":                 flon,
+				"geohash":                   ghash,
+				"geohash5":                  ghash5,
+				"distanceKm":                math.Round(dist*10) / 10,
+				"sports":                    sports,
 				"customer_services_enabled": custOK,
-				"maintenance":              maint,
+				"maintenance":               maint,
 			})
 		}
-		return true, "OK", map[string]any{"facilities": out}
+		sort.SliceStable(out, func(i, j int) bool {
+			di, _ := out[i]["distanceKm"].(float64)
+			dj, _ := out[j]["distanceKm"].(float64)
+			return di < dj
+		})
+		return true, "OK", map[string]any{"facilities": out, "geoReady": true}
 	default:
 		return false, "unknown_action", nil
 	}
+}
+
+// facilitiesCityDistance: city-wide facilities ordered by km from lat/lon (no radius cut).
+// If city filter matches nothing (empty/mismatched city_name), fall back to nearest
+// facilities from the city center so IP/city browse is never empty when data exists.
+func (s *Service) facilitiesCityDistance(ctx context.Context, body map[string]any) (bool, string, any) {
+	lat, _ := strconv.ParseFloat(fmt.Sprint(body["lat"]), 64)
+	lon, _ := strconv.ParseFloat(fmt.Sprint(body["lon"]), 64)
+	sportID, _ := strconv.ParseInt(strField(body, "sportId"), 10, 64)
+	cityQ := strings.ToLower(strings.TrimSpace(strField(body, "city")))
+	limit, _ := strconv.Atoi(fmt.Sprint(body["limit"]))
+	if limit <= 0 {
+		limit = 120
+	}
+	sportsByFac := s.allFacilitySportsMap(ctx)
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT f.id, f.name, f.location, f.city_name, f.logo_url, f.latitude, f.longitude,
+       COALESCE(f.geohash,''), COALESCE(f.geohash5,''),
+       f.customer_ok, f.maintenance
+FROM app_facilities f WHERE f.status='active'`)
+	if err != nil {
+		return false, err.Error(), nil
+	}
+	defer rows.Close()
+	matched := []map[string]any{}
+	all := []map[string]any{}
+	for rows.Next() {
+		var id int64
+		var name, loc, city, logo, ghash, ghash5 string
+		var flat, flon float64
+		var custOK, maint bool
+		_ = rows.Scan(&id, &name, &loc, &city, &logo, &flat, &flon, &ghash, &ghash5, &custOK, &maint)
+		sports := sportsByFac[id]
+		if sports == nil {
+			sports = []map[string]any{}
+		}
+		if sportID > 0 {
+			ok := false
+			for _, sp := range sports {
+				if sp["sportId"] == sportID {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				continue
+			}
+		}
+		dist := 0.0
+		if lat != 0 || lon != 0 {
+			dist = haversineKm(lat, lon, flat, flon)
+		}
+		row := map[string]any{
+			"facilityId":                id,
+			"facilityName":              name,
+			"location":                  loc,
+			"cityName":                  city,
+			"facilityLogoUrl":           logo,
+			"latitude":                  flat,
+			"longitude":                 flon,
+			"geohash":                   ghash,
+			"geohash5":                  ghash5,
+			"distanceKm":                math.Round(dist*10) / 10,
+			"sports":                    sports,
+			"customer_services_enabled": custOK,
+			"maintenance":               maint,
+		}
+		all = append(all, row)
+		if cityQ == "" || cityMatchesQuery(cityQ, city, loc, name) {
+			matched = append(matched, row)
+		}
+	}
+	out := matched
+	scope := "city"
+	if cityQ != "" && len(matched) == 0 {
+		// city_name often blank in DB — show nearest from city center instead.
+		out = all
+		scope = "city_fallback_distance"
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		di, _ := out[i]["distanceKm"].(float64)
+		dj, _ := out[j]["distanceKm"].(float64)
+		return di < dj
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return true, "OK", map[string]any{
+		"facilities": out,
+		"count":      len(out),
+		"geoReady":   true,
+		"city":       strField(body, "city"),
+		"scope":      scope,
+	}
+}
+
+func cityMatchesQuery(cityQ, cityName, location, facilityName string) bool {
+	if cityQ == "" {
+		return true
+	}
+	cl := strings.ToLower(strings.TrimSpace(cityName))
+	ll := strings.ToLower(location)
+	nl := strings.ToLower(facilityName)
+	if cl == cityQ ||
+		strings.Contains(cl, cityQ) ||
+		(cl != "" && strings.Contains(cityQ, cl)) {
+		return true
+	}
+	if strings.Contains(ll, cityQ) || strings.Contains(nl, cityQ) {
+		return true
+	}
+	return false
 }
 
 func (s *Service) facilitySports(ctx context.Context, fid int64) []map[string]any {
@@ -360,32 +488,64 @@ JOIN app_sports s ON s.id=fs.sport_id WHERE fs.facility_id=$1`, fid)
 	return list
 }
 
+// allFacilitySportsMap loads sports for every facility in one query (avoids N+1).
+func (s *Service) allFacilitySportsMap(ctx context.Context) map[int64][]map[string]any {
+	out := map[int64][]map[string]any{}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT fs.facility_id, s.id, s.name
+FROM app_facility_sports fs
+JOIN app_sports s ON s.id = fs.sport_id
+ORDER BY fs.facility_id, s.name`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fid, sid int64
+		var name string
+		if err := rows.Scan(&fid, &sid, &name); err != nil {
+			continue
+		}
+		out[fid] = append(out[fid], map[string]any{"sportId": sid, "sportName": name})
+	}
+	return out
+}
+
 func (s *Service) citiesPayload(ctx context.Context) (bool, string, any) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, name, state_name, latitude, longitude FROM app_cities ORDER BY name`)
 	if err != nil {
 		return false, err.Error(), nil
 	}
 	defer rows.Close()
+
+	// One areas query — group by city (avoids N+1 per city).
+	areasByCity := map[int64][]map[string]any{}
+	if arows, aerr := s.DB.QueryContext(ctx, `
+SELECT city_id, id, name, latitude, longitude FROM app_areas ORDER BY city_id, name`); aerr == nil {
+		for arows.Next() {
+			var cid, aid int64
+			var aname string
+			var alat, alon float64
+			if err := arows.Scan(&cid, &aid, &aname, &alat, &alon); err != nil {
+				continue
+			}
+			areasByCity[cid] = append(areasByCity[cid], map[string]any{
+				"areaId": aid, "areaName": aname, "name": aname,
+				"latitude": alat, "longitude": alon, "aliases": []string{},
+			})
+		}
+		arows.Close()
+	}
+
 	cities := []map[string]any{}
 	for rows.Next() {
 		var id int64
 		var name, state string
 		var lat, lon float64
 		_ = rows.Scan(&id, &name, &state, &lat, &lon)
-		arows, _ := s.DB.QueryContext(ctx, `SELECT id, name, latitude, longitude FROM app_areas WHERE city_id=$1`, id)
-		areas := []map[string]any{}
-		if arows != nil {
-			for arows.Next() {
-				var aid int64
-				var aname string
-				var alat, alon float64
-				_ = arows.Scan(&aid, &aname, &alat, &alon)
-				areas = append(areas, map[string]any{
-					"areaId": aid, "areaName": aname, "name": aname,
-					"latitude": alat, "longitude": alon, "aliases": []string{},
-				})
-			}
-			arows.Close()
+		areas := areasByCity[id]
+		if areas == nil {
+			areas = []map[string]any{}
 		}
 		cities = append(cities, map[string]any{
 			"cityId": id, "cityName": name, "stateName": state,
@@ -399,6 +559,11 @@ func (s *Service) GetSlots(ctx context.Context, facilityID, sportID int64, date 
 	if date == "" {
 		date = time.Now().Format("2006-01-02")
 	}
+	if facilityID <= 0 || sportID <= 0 {
+		return false, "facilityId and sportId are required.", nil
+	}
+	s.releaseExpiredHolds(ctx, facilityID)
+	s.ensureSlotsForDay(ctx, facilityID, sportID, date)
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT facility_id, sport_id, court_name, slot_date::text, time_range, status, held_by_user_id
 FROM app_slots WHERE facility_id=$1 AND sport_id=$2 AND slot_date=$3::date
@@ -415,7 +580,8 @@ ORDER BY court_name, time_range`, facilityID, sportID, date)
 		_ = rows.Scan(&fid, &sid, &court, &d, &tr, &st, &held)
 		item := map[string]any{
 			"facilityId": fid, "sportId": sid, "courtName": court,
-			"date": d, "timeRange": tr, "status": st,
+			"date": d, "timeRange": tr, "status": strings.ToLower(st),
+			"held_by_userId": 0, "heldByUserId": 0,
 		}
 		if held.Valid {
 			item["held_by_userId"] = held.Int64
@@ -428,21 +594,57 @@ ORDER BY court_name, time_range`, facilityID, sportID, date)
 
 func (s *Service) MarkBooked(ctx context.Context, body map[string]any) (bool, string, any) {
 	fid, _ := strconv.ParseInt(fmt.Sprint(body["facilityId"]), 10, 64)
+	sid, _ := strconv.ParseInt(fmt.Sprint(body["sportId"]), 10, 64)
 	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
 	notes := strings.TrimSpace(fmt.Sprint(body["notes"]))
 	price, _ := strconv.ParseFloat(fmt.Sprint(body["totalPrice"]), 64)
 	slotsRaw, _ := body["slotsToBook"].([]any)
+	if slotsRaw == nil {
+		slotsRaw, _ = body["slots"].([]any)
+	}
 	slotsJSON, _ := json.Marshal(slotsRaw)
 	var bid int64
 	err := s.DB.QueryRowContext(ctx, `
-INSERT INTO app_bookings (facility_id, user_id, notes, amount, slots_json, payment_mode, formatted_time, raw_timestamp)
-VALUES ($1,$2,$3,$4,$5::jsonb,'spot',$6,NOW()) RETURNING id`,
-		fid, uid, notes, price, string(slotsJSON), fmt.Sprint(slotsRaw)).Scan(&bid)
+INSERT INTO app_bookings (facility_id, sport_id, user_id, notes, amount, slots_json, payment_mode, formatted_time, raw_timestamp)
+VALUES ($1,$2,$3,$4,$5,$6::jsonb,'spot',$7,NOW()) RETURNING id`,
+		fid, sid, uid, notes, price, string(slotsJSON), fmt.Sprint(slotsRaw)).Scan(&bid)
 	if err != nil {
 		return false, err.Error(), nil
 	}
+	for _, sl := range slotsRaw {
+		m, _ := sl.(map[string]any)
+		if m == nil {
+			continue
+		}
+		court := firstNonEmpty(fmt.Sprint(m["court"]), fmt.Sprint(m["courtName"]), fmt.Sprint(m["subFacilityName"]))
+		date := firstNonEmpty(fmt.Sprint(m["date"]), fmt.Sprint(m["slotDate"]), fmt.Sprint(m["slot_date"]))
+		tr := firstNonEmpty(fmt.Sprint(m["time"]), fmt.Sprint(m["timeRange"]), fmt.Sprint(m["time_range"]))
+		sport := sid
+		if v, _ := strconv.ParseInt(fmt.Sprint(m["sportId"]), 10, 64); v > 0 {
+			sport = v
+		}
+		if court == "" || date == "" || tr == "" {
+			continue
+		}
+		_, _ = s.DB.ExecContext(ctx, `
+UPDATE app_slots
+SET status='booked', held_by_user_id=NULL, onhold_update_time=NULL
+WHERE facility_id=$1 AND ($2=0 OR sport_id=$2)
+  AND court_name=$3 AND slot_date=$4::date AND time_range=$5`,
+			fid, sport, court, date, tr)
+	}
 	_, _, _ = s.UsersLookup(ctx, map[string]any{"action": "add_facility_access", "userId": uid, "facilityId": fid})
 	return true, "Booked", map[string]any{"bookingId": bid}
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v != "" && v != "<nil>" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (s *Service) BookingCheckout(ctx context.Context, body map[string]any) (bool, string, any, int) {
@@ -453,11 +655,23 @@ func (s *Service) BookingCheckout(ctx context.Context, body map[string]any) (boo
 
 	var blocked bool
 	_ = s.DB.QueryRowContext(ctx, `SELECT booking_blocked FROM app_facilities WHERE id=$1`, fid).Scan(&blocked)
-	if blocked && (action == "initiate_payment" || action == "confirm_booking" || action == "payment_options") {
+	if blocked && (action == "initiate_payment" || action == "confirm_booking" || action == "payment_options" || action == "set_slots_onhold" || action == "release_hold") {
 		return false, "Bookings temporarily unavailable", map[string]any{"booking_blocked": true}, 402
 	}
 
 	switch action {
+	case "set_slots_onhold":
+		slots, _ := body["slots"].([]any)
+		if err := s.holdSlotsForUser(ctx, fid, sportID, uid, slots); err != nil {
+			return false, err.Error(), nil, 409
+		}
+		return true, "Slots held.", map[string]any{
+			"facilityId": fid, "userId": uid, "holdMinutes": int(slotHoldTTL.Minutes()),
+		}, 200
+	case "release_hold":
+		slots, _ := body["slots"].([]any)
+		s.releaseUserHolds(ctx, fid, sportID, uid, slots)
+		return true, "Hold released.", map[string]any{"facilityId": fid, "userId": uid}, 200
 	case "payment_options":
 		rows, err := s.DB.QueryContext(ctx, `
 SELECT court_name, day_type, price, advance_amount FROM app_price_list
@@ -481,84 +695,238 @@ WHERE facility_id=$1 AND sport_id=$2`, fid, sportID)
 		}
 		if len(plist) == 0 {
 			plist = append(plist, map[string]any{
-				"subFacilityName": "Court 1", "dayType": "weekday", "price": 500, "advance_amount": 100,
+				"subFacilityName": "Court 1", "dayType": "WEEKDAY", "price": 500, "advance_amount": 100,
 			})
 		}
+		for i := range plist {
+			if dt, ok := plist[i]["dayType"].(string); ok {
+				plist[i]["dayType"] = normalizePriceDayType(dt)
+			}
+		}
+		allowFull, allowAdv, allowSpot, sportAdv := s.loadSportPaymentFlags(ctx, fid, sportID)
+		if sportAdv > 0 {
+			adv = sportAdv
+		}
+		af, aa, aspot := 1, 1, 1
+		if !allowFull {
+			af = 0
+		}
+		if !allowAdv {
+			aa = 0
+		}
+		if !allowSpot {
+			aspot = 0
+		}
 		return true, "OK", map[string]any{
-			"allow_full_payment": true, "allow_advance_payment": true, "allow_spot_payment": true,
+			"allow_full_payment": af, "allow_advance_payment": aa, "allow_spot_payment": aspot,
 			"advance_amount": adv, "Booking_advance_amount": adv,
 			"payment_source": "app", "priceList": plist,
 		}, 200
+	case "quote":
+		slots, _ := body["slots"].([]any)
+		mode := fmt.Sprint(body["paymentMode"])
+		coupon := strings.TrimSpace(fmt.Sprint(body["couponCode"]))
+		q, qerr := s.buildCheckoutQuote(ctx, fid, sportID, uid, slots, mode, coupon)
+		if qerr != nil {
+			return false, qerr.Error(), nil, 400
+		}
+		return true, "OK", quoteToMap(q), 200
 	case "validate_coupon":
-		code := strings.ToUpper(strings.TrimSpace(fmt.Sprint(body["couponCode"])))
-		var value float64
-		var ctype string
-		err := s.DB.QueryRowContext(ctx, `
-SELECT value, ctype FROM app_coupons WHERE facility_id=$1 AND UPPER(code)=$2 AND status='active'`,
-			fid, code).Scan(&value, &ctype)
+		code := strings.TrimSpace(fmt.Sprint(body["couponCode"]))
+		if code == "" {
+			return false, "facilityId and couponCode are required.", nil, 400
+		}
+		disc, isReg, isUser, err := s.resolveCouponDiscount(ctx, fid, uid, code)
 		if err != nil {
 			return false, "Invalid coupon", nil, 400
 		}
-		return true, "OK", map[string]any{"discount": value, "type": ctype}, 200
+		ctype := s.couponCType(ctx, fid, code)
+		if isUser {
+			ctype = "flat"
+		}
+		if isReg {
+			ctype = "reg"
+		}
+		return true, "Coupon applied.", map[string]any{
+			"discount": disc, "type": ctype, "couponCode": strings.ToUpper(code),
+		}, 200
 	case "get_available_coupons":
+		list := []map[string]any{}
 		rows, err := s.DB.QueryContext(ctx, `
 SELECT code, value, ctype, label, description FROM app_coupons
-WHERE facility_id=$1 AND status='active'`, fid)
-		if err != nil {
-			return false, err.Error(), nil, 400
+WHERE facility_id=$1 AND status='active' AND code NOT ILIKE 'REF-%'`, fid)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var code, ctype, label, desc string
+				var value float64
+				if rows.Scan(&code, &value, &ctype, &label, &desc) != nil {
+					continue
+				}
+				list = append(list, map[string]any{
+					"code": code, "value": value, "type": ctype,
+					"label": label, "description": desc, "source": "PROMO",
+				})
+			}
 		}
-		defer rows.Close()
-		list := []map[string]any{}
-		for rows.Next() {
-			var code, ctype, label, desc string
-			var value float64
-			_ = rows.Scan(&code, &value, &ctype, &label, &desc)
-			list = append(list, map[string]any{
-				"code": code, "value": value, "type": ctype, "label": label, "description": desc,
-			})
+		// User refund coupons (PHP get_available_coupons user REF branch).
+		if uid > 0 {
+			urow, uerr := s.DB.QueryContext(ctx, `
+SELECT coupon_code, amount, COALESCE(expiry_date::text,'') FROM app_user_coupons
+WHERE user_id=$1 AND facility_id=$2
+  AND (expiry_date IS NULL OR expiry_date >= CURRENT_DATE)`, uid, fid)
+			if uerr == nil {
+				defer urow.Close()
+				for urow.Next() {
+					var code, exp string
+					var amt float64
+					if urow.Scan(&code, &amt, &exp) != nil {
+						continue
+					}
+					list = append(list, map[string]any{
+						"code": code, "value": amt, "type": "flat",
+						"label": "Refund coupon", "description": "Cancellation refund",
+						"source": "COUPON", "expiryDate": exp,
+					})
+				}
+			}
 		}
-		return true, "OK", map[string]any{"coupons": list}, 200
+		return true, "OK", map[string]any{"coupons": list, "count": len(list)}, 200
 	case "initiate_payment":
 		mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["paymentMode"])))
-		amount := 500.0
-		if mode == "advance" {
-			amount = 100
-		} else if mode == "spot" {
-			amount = 0
-		}
 		slots, _ := body["slots"].([]any)
-		if n := len(slots); n > 1 && mode != "spot" {
-			amount = amount * float64(n)
+		coupon := strings.TrimSpace(fmt.Sprint(body["couponCode"]))
+		q, qerr := s.buildCheckoutQuote(ctx, fid, sportID, uid, slots, mode, coupon)
+		if qerr != nil {
+			return false, qerr.Error(), nil, 400
 		}
-		orderID := fmt.Sprintf("order_local_%d_%d", uid, time.Now().Unix())
-		return true, "OK", map[string]any{
-			"orderId": orderID, "amount": amount, "keyId": s.Cfg.RazorpayKeyID,
-		}, 200
+		if !q.ModeAllowed {
+			return false, "Selected payment mode is not allowed.", nil, 400
+		}
+		amount := q.Payable
+		if amount <= 0 {
+			return false, "Nothing to charge online for this mode. Use confirm_booking for spot/free.", nil, 400
+		}
+		if v, err := strconv.ParseFloat(fmt.Sprint(body["amount"]), 64); err == nil && v > 0 {
+			if absFloat(v-amount) <= 1 {
+				amount = v
+			}
+		}
+		if err := s.holdSlotsForUser(ctx, fid, sportID, uid, slots); err != nil {
+			return false, err.Error(), nil, 409
+		}
+		orderID, keyID, amt, oerr := s.createPaymentOrder(ctx, amount, fmt.Sprintf("book_%d_%d", fid, uid), "BOOKING", map[string]any{
+			"userId": uid, "facilityId": fid, "sportId": sportID, "mode": q.PaymentMode, "couponCode": q.CouponCode,
+		})
+		if oerr != nil && orderID == "" {
+			s.releaseUserHolds(ctx, fid, sportID, uid, slots)
+			return false, oerr.Error(), nil, 400
+		}
+		paise := int64(amt*100 + 0.5)
+		if paise < 100 && amt > 0 {
+			paise = 100
+		}
+		out := quoteToMap(q)
+		out["orderId"] = orderID
+		out["amount"] = amt
+		out["keyId"] = keyID
+		out["currency"] = "INR"
+		out["amountInr"] = amt
+		out["amountPaise"] = paise
+		out["holdMinutes"] = int(slotHoldTTL.Minutes())
+		return true, "OK", out, 200
 	case "confirm_booking":
 		slots, _ := body["slots"].([]any)
+		method := strings.TrimSpace(fmt.Sprint(body["paymentMethod"]))
+		mode := normalizePayMode(fmt.Sprint(body["paymentMode"]), method)
+		txn := strings.TrimSpace(fmt.Sprint(body["razorpayPaymentId"]))
+		coupon := strings.TrimSpace(fmt.Sprint(body["couponCode"]))
+		if txn == "" {
+			return false, "razorpayPaymentId is required.", nil, 400
+		}
+		q, qerr := s.buildCheckoutQuote(ctx, fid, sportID, uid, slots, mode, coupon)
+		if qerr != nil {
+			return false, qerr.Error(), nil, 400
+		}
+		if !q.ModeAllowed {
+			return false, "Selected payment mode is not allowed.", nil, 400
+		}
+		mode = q.PaymentMode
+		paid := q.Payable
+		orderID := strings.TrimSpace(fmt.Sprint(body["razorpayOrderId"]))
+		signature := strings.TrimSpace(fmt.Sprint(body["razorpaySignature"]))
+		methodLower := strings.ToLower(method)
+		if methodLower == "online" || (paid > 0 && !strings.HasPrefix(strings.ToUpper(txn), "SPOT_") && !strings.HasPrefix(strings.ToUpper(txn), "FREE_")) {
+			secret := strings.TrimSpace(s.Cfg.RazorpayKeySecret)
+			if secret != "" && !strings.Contains(s.Cfg.RazorpayKeyID, "test_local") {
+				if orderID == "" || signature == "" {
+					return false, "razorpayOrderId and razorpaySignature are required for online payment.", nil, 400
+				}
+				if !verifyRazorpaySignature(orderID, txn, signature, secret) {
+					return false, "Invalid payment signature.", nil, 400
+				}
+			}
+		}
+		// Idempotent: same transaction already confirmed.
+		var existingID int64
+		_ = s.DB.QueryRowContext(ctx, `
+SELECT id FROM app_bookings WHERE transaction_id=$1 AND user_id=$2 LIMIT 1`, txn, uid).Scan(&existingID)
+		if existingID > 0 {
+			ok, _, access := s.UsersLookup(ctx, map[string]any{"action": "add_facility_access", "userId": uid, "facilityId": fid})
+			accessed := []int64{}
+			if ok {
+				if m, ok2 := access.(map[string]any); ok2 {
+					accessed = s.parseIDs(m["accessedFacilityIds"])
+				}
+			}
+			return true, "Already confirmed.", map[string]any{
+				"bookingId": existingID, "transactionId": txn, "facilityId": fid,
+				"accessedFacilityIds": accessed, "finalAmount": paid, "totalBill": q.TotalBill,
+				"balanceDue": q.BalanceDue, "paymentMode": mode, "discount": q.Discount,
+			}, 200
+		}
+		if err := s.holdSlotsForUser(ctx, fid, sportID, uid, slots); err != nil {
+			return false, err.Error(), nil, 409
+		}
 		slotsJSON, _ := json.Marshal(slots)
-		mode := fmt.Sprint(body["paymentMode"])
-		txn := fmt.Sprint(body["razorpayPaymentId"])
-		method := fmt.Sprint(body["paymentMethod"])
+		meta := bookingMetaFromSlots(slots)
+		slotStart := meta.Start
+		if slotStart.IsZero() {
+			slotStart = time.Now()
+		}
+		ftime := meta.FormattedTime
+		if ftime == "" {
+			ftime = meta.TimesJoined
+		}
+		notes := "Booking via App"
+		if q.IsRegOffer {
+			notes = "Reg Offer Applied: " + q.CouponCode
+		} else if q.CouponCode != "" {
+			notes = "Coupon: " + q.CouponCode
+		}
+		if method == "" {
+			if mode == "spot" {
+				method = "Spot"
+			} else if mode == "free" {
+				method = "Coupon"
+			} else {
+				method = "Online"
+			}
+		}
 		var bid int64
 		err := s.DB.QueryRowContext(ctx, `
-INSERT INTO app_bookings (facility_id, sport_id, user_id, payment_mode, payment_method, transaction_id, slots_json, formatted_time, raw_timestamp)
-VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,NOW()) RETURNING id`,
-			fid, sportID, uid, mode, method, txn, string(slotsJSON), fmt.Sprint(slots)).Scan(&bid)
+INSERT INTO app_bookings (
+  facility_id, sport_id, user_id, payment_mode, payment_method, transaction_id,
+  amount, notes, slots_json, formatted_time, formatted_date, court_names, raw_timestamp
+)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13) RETURNING id`,
+			fid, sportID, uid, mode, method, txn, paid, notes, string(slotsJSON),
+			ftime, meta.FormattedDate, meta.Courts, slotStart).Scan(&bid)
 		if err != nil {
 			return false, err.Error(), nil, 400
 		}
-		// mark slots booked
-		for _, sl := range slots {
-			m, _ := sl.(map[string]any)
-			if m == nil {
-				continue
-			}
-			_, _ = s.DB.ExecContext(ctx, `
-UPDATE app_slots SET status='booked' WHERE facility_id=$1 AND sport_id=$2
-  AND court_name=$3 AND slot_date=$4::date AND time_range=$5`,
-				fid, sportID, fmt.Sprint(m["court"]), fmt.Sprint(m["date"]), fmt.Sprint(m["time"]))
-		}
+		s.markSlotsBookedFromKeys(ctx, fid, sportID, slots)
+		s.consumeCheckoutCoupon(ctx, fid, uid, q, bid)
 		ok, _, access := s.UsersLookup(ctx, map[string]any{"action": "add_facility_access", "userId": uid, "facilityId": fid})
 		accessed := []int64{}
 		if ok {
@@ -566,9 +934,13 @@ UPDATE app_slots SET status='booked' WHERE facility_id=$1 AND sport_id=$2
 				accessed = s.parseIDs(m["accessedFacilityIds"])
 			}
 		}
+		// Server payable drives WA template (PHP notifyBookingConfirmation).
+		s.notifyBookingConfirmation(ctx, uid, fid, bid, slots, mode, txn, paid, q.Discount, q.TotalBill, q.BalanceDue)
 		return true, "Confirmed", map[string]any{
 			"bookingId": bid, "transactionId": txn, "facilityId": fid,
 			"accessedFacilityIds": accessed,
+			"finalAmount": paid, "totalBill": q.TotalBill,
+			"balanceDue": q.BalanceDue, "paymentMode": mode, "discount": q.Discount,
 		}, 200
 	default:
 		return false, "unknown_action", nil, 400
@@ -585,26 +957,101 @@ func (s *Service) MyBookings(ctx context.Context, body map[string]any) (bool, st
 		if u != nil {
 			ids = s.parseIDs(u["accessedFacilityIds"])
 		}
+		now := time.Now().In(bookingTZ())
 		facilities := []map[string]any{}
+		upcomingFacilities := []map[string]any{}
+		historyFacilities := []map[string]any{}
+		otherFacilities := []map[string]any{}
 		for _, fid := range ids {
 			var name string
 			var maint bool
 			_ = s.DB.QueryRowContext(ctx, `SELECT name, maintenance FROM app_facilities WHERE id=$1`, fid).Scan(&name, &maint)
-			var upc, hist int
-			_ = s.DB.QueryRowContext(ctx, `
-SELECT COUNT(*) FILTER (WHERE status='confirmed' AND raw_timestamp > NOW()),
-       COUNT(*) FILTER (WHERE status='cancelled' OR raw_timestamp <= NOW())
-FROM app_bookings WHERE user_id=$1 AND facility_id=$2`, uid, fid).Scan(&upc, &hist)
-			facilities = append(facilities, map[string]any{
-				"facilityId": fid, "facilityName": name, "upcomingCount": upc, "historyCount": hist,
-				"group": "accessed", "maintenance": maint,
-			})
+			rows, err := s.DB.QueryContext(ctx, `
+SELECT status, raw_timestamp, slots_json FROM app_bookings
+WHERE user_id=$1 AND facility_id=$2`, uid, fid)
+			upc, hist := 0, 0
+			var nextTs, lastTs int64
+			if err == nil {
+				for rows.Next() {
+					var status string
+					var ts time.Time
+					var slotsJSON []byte
+					if rows.Scan(&status, &ts, &slotsJSON) != nil {
+						continue
+					}
+					start := bookingMetaFromSlotsJSON(slotsJSON).Start
+					if start.IsZero() {
+						start = ts
+					}
+					if isUpcomingBooking(status, start, now) {
+						upc++
+						unix := start.Unix()
+						if nextTs == 0 || unix < nextTs {
+							nextTs = unix
+						}
+					} else {
+						hist++
+						unix := start.Unix()
+						if unix > lastTs {
+							lastTs = unix
+						}
+					}
+				}
+				rows.Close()
+			}
+			group := "other"
+			if upc > 0 {
+				group = "upcoming"
+			} else if hist > 0 {
+				group = "history"
+			}
+			item := map[string]any{
+				"facilityId": fid, "facilityName": name,
+				"upcomingCount": upc, "historyCount": hist,
+				"nextBookingAt": nil, "lastBookingAt": nil,
+				"nextTimestamp": nextTs, "lastTimestamp": lastTs,
+				"group": group, "maintenance": maint,
+				"customer_services_enabled": !maint,
+			}
+			if nextTs > 0 {
+				item["nextBookingAt"] = time.Unix(nextTs, 0).In(bookingTZ()).Format(time.RFC3339)
+			}
+			if lastTs > 0 {
+				item["lastBookingAt"] = time.Unix(lastTs, 0).In(bookingTZ()).Format(time.RFC3339)
+			}
+			facilities = append(facilities, item)
+			switch group {
+			case "upcoming":
+				upcomingFacilities = append(upcomingFacilities, item)
+			case "history":
+				historyFacilities = append(historyFacilities, item)
+			default:
+				otherFacilities = append(otherFacilities, item)
+			}
 		}
-		return true, "OK", map[string]any{
+		sort.SliceStable(upcomingFacilities, func(i, j int) bool {
+			ti, _ := upcomingFacilities[i]["nextTimestamp"].(int64)
+			tj, _ := upcomingFacilities[j]["nextTimestamp"].(int64)
+			if ti == 0 {
+				return false
+			}
+			if tj == 0 {
+				return true
+			}
+			return ti < tj
+		})
+		sort.SliceStable(historyFacilities, func(i, j int) bool {
+			ti, _ := historyFacilities[i]["lastTimestamp"].(int64)
+			tj, _ := historyFacilities[j]["lastTimestamp"].(int64)
+			return ti > tj
+		})
+		return true, "Facilities retrieved.", map[string]any{
 			"accessedFacilityIds": ids,
 			"facilities":          facilities,
-			"upcomingFacilities":  facilities,
-			"historyFacilities":   facilities,
+			"upcomingFacilities":  upcomingFacilities,
+			"historyFacilities":   historyFacilities,
+			"otherFacilities":     otherFacilities,
+			"count":               len(facilities),
 		}
 	case "list":
 		fid, _ := strconv.ParseInt(fmt.Sprint(body["facilityId"]), 10, 64)
@@ -614,33 +1061,48 @@ SELECT b.id, b.facility_id, COALESCE(f.name,''), b.sport_id, b.status,
 FROM app_bookings b
 LEFT JOIN app_facilities f ON f.id=b.facility_id
 WHERE b.user_id=$1 AND ($2=0 OR b.facility_id=$2)
-ORDER BY b.raw_timestamp DESC`, uid, fid)
+ORDER BY b.id DESC`, uid, fid)
 		if err != nil {
 			return false, err.Error(), nil
 		}
 		defer rows.Close()
 		upcoming, history := []map[string]any{}, []map[string]any{}
-		now := time.Now()
+		upcomingGroups := map[string][]map[string]any{}
+		now := time.Now().In(bookingTZ())
 		for rows.Next() {
 			var id, facilityID, sportID int64
 			var fname, status, ftime, fdate, courts string
 			var ts time.Time
 			var slotsJSON []byte
 			_ = rows.Scan(&id, &facilityID, &fname, &sportID, &status, &ftime, &fdate, &ts, &courts, &slotsJSON)
-			item := map[string]any{
-				"bookingId": id, "facilityId": facilityID, "facilityName": fname,
-				"sportId": sportID, "sportName": "", "subFacilityNames": courts,
-				"formatted_time": ftime, "formatted_date": fdate,
-				"ui_day": fmt.Sprintf("%02d", ts.Day()),
-				"ui_month": ts.Format("Jan"), "ui_weekday": ts.Weekday().String()[:3],
-				"raw_timestamp": ts.Format(time.RFC3339), "status": status,
+			meta := bookingMetaFromSlotsJSON(slotsJSON)
+			start := meta.Start
+			if start.IsZero() {
+				start = ts
 			}
-			if status == "confirmed" && ts.After(now) {
+			// Prefer slot-derived display (old rows stored fmt.Sprint(slots) junk).
+			if meta.Courts != "" {
+				courts = meta.Courts
+			}
+			if meta.TimesJoined != "" {
+				ftime = meta.TimesJoined
+			} else if meta.FormattedTime != "" {
+				ftime = meta.FormattedTime
+			}
+			if meta.FormattedDate != "" {
+				fdate = meta.FormattedDate
+			}
+			sportName := s.sportName(ctx, sportID)
+			item := bookingListItem(id, facilityID, sportID, fname, sportName, status, start, courts, ftime, fdate)
+			if isUpcomingBooking(status, start, now) {
 				upcoming = append(upcoming, item)
+				upcomingGroups[sportName] = append(upcomingGroups[sportName], item)
 			} else {
 				history = append(history, item)
 			}
 		}
+		sortBookingsByStart(upcoming, true)
+		sortBookingsByStart(history, false)
 		coupons := []map[string]any{}
 		crows, _ := s.DB.QueryContext(ctx, `
 SELECT coupon_code, amount, expiry_date::text, facility_id FROM app_user_coupons WHERE user_id=$1`, uid)
@@ -651,28 +1113,88 @@ SELECT coupon_code, amount, expiry_date::text, facility_id FROM app_user_coupons
 				var amt float64
 				var cfid int64
 				_ = crows.Scan(&code, &amt, &exp, &cfid)
+				var cname string
+				_ = s.DB.QueryRowContext(ctx, `SELECT COALESCE(name,'') FROM app_facilities WHERE id=$1`, cfid).Scan(&cname)
 				coupons = append(coupons, map[string]any{
-					"couponCode": code, "amount": amt, "expiryDate": exp, "facilityId": cfid,
+					"couponCode": code, "amount": amt, "expiryDate": exp,
+					"facilityId": cfid, "facilityName": cname,
 				})
 			}
 		}
-		return true, "OK", map[string]any{
-			"upcoming": upcoming, "history": history, "upcomingGroups": upcoming, "coupons": coupons,
+		return true, "Bookings retrieved.", map[string]any{
+			"upcoming": upcoming, "history": history,
+			"upcomingGroups": upcomingGroups, "coupons": coupons,
+			"countUpcoming": len(upcoming), "countHistory": len(history),
+			"countCoupons": len(coupons),
 		}
 	case "cancel":
 		bid, _ := strconv.ParseInt(fmt.Sprint(body["bookingId"]), 10, 64)
-		var fname string
-		err := s.DB.QueryRowContext(ctx, `
-UPDATE app_bookings b SET status='cancelled', cancelled_at=NOW()
-FROM app_facilities f WHERE b.id=$1 AND b.user_id=$2 AND f.id=b.facility_id
-RETURNING f.name`, bid, uid).Scan(&fname)
-		if err != nil {
-			_, _ = s.DB.ExecContext(ctx, `UPDATE app_bookings SET status='cancelled', cancelled_at=NOW() WHERE id=$1 AND user_id=$2`, bid, uid)
-			fname = ""
+		reqFid, _ := strconv.ParseInt(fmt.Sprint(body["facilityId"]), 10, 64)
+		if bid <= 0 || uid <= 0 {
+			return false, "facilityId, bookingId, and userId are required.", nil
 		}
-		return true, "Cancelled", map[string]any{"facilityName": fname}
+		var facilityID, sportID int64
+		var status, fname, notes, payMode string
+		var paidAmount float64
+		var ts time.Time
+		var slotsJSON []byte
+		err := s.DB.QueryRowContext(ctx, `
+SELECT b.id, b.facility_id, b.sport_id, b.status, b.raw_timestamp, b.slots_json,
+       COALESCE(f.name,''), COALESCE(b.amount,0), COALESCE(b.notes,''),
+       COALESCE(b.payment_mode,'')
+FROM app_bookings b
+LEFT JOIN app_facilities f ON f.id=b.facility_id
+WHERE b.id=$1 AND b.user_id=$2`, bid, uid).
+			Scan(&bid, &facilityID, &sportID, &status, &ts, &slotsJSON, &fname, &paidAmount, &notes, &payMode)
+		if err != nil {
+			return false, "Booking not found.", nil
+		}
+		priorCoupon := couponCodeFromNotes(notes)
+		if reqFid > 0 && facilityID != reqFid {
+			return false, "Booking not found for this facility.", nil
+		}
+		if !strings.EqualFold(status, "confirmed") {
+			return false, "Booking already cancelled.", nil
+		}
+		start := bookingMetaFromSlotsJSON(slotsJSON).Start
+		if start.IsZero() {
+			start = ts
+		}
+		now := time.Now().In(bookingTZ())
+		if !isUpcomingBooking(status, start, now) {
+			return false, "Too late to cancel (must be 15+ minutes before start).", nil
+		}
+		_, err = s.DB.ExecContext(ctx, `
+UPDATE app_bookings SET status='cancelled', cancelled_at=NOW()
+WHERE id=$1 AND user_id=$2 AND status='confirmed'`, bid, uid)
+		if err != nil {
+			return false, "Cancellation failed.", nil
+		}
+		s.releaseBookingSlots(ctx, facilityID, sportID, slotsJSON)
+		// Spot / free → no refund coupon (PHP: transaction_amount > 0 only).
+		if strings.EqualFold(payMode, "spot") || strings.EqualFold(payMode, "free") {
+			paidAmount = 0
+		}
+		couponCode, couponAmt, expiry := s.mintCancelRefundCoupon(ctx, uid, facilityID, bid, paidAmount, notes, priorCoupon)
+		isRegOffer := strings.Contains(strings.ToLower(notes), "reg offer") ||
+			strings.HasPrefix(strings.ToUpper(priorCoupon), "REG-")
+		s.notifyBookingCancelled(ctx, uid, facilityID, sportID, bid, fname, slotsJSON, couponCode, couponAmt, isRegOffer)
+		var coupon any
+		if couponCode != "" {
+			coupon = couponCode
+		} else {
+			coupon = nil
+		}
+		out := map[string]any{
+			"facilityId": facilityID, "bookingId": strconv.FormatInt(bid, 10),
+			"facilityName": fname, "coupon": coupon, "amount": couponAmt,
+		}
+		if expiry != "" {
+			out["expiry"] = expiry
+		}
+		return true, "Booking cancelled.", out
 	default:
-		return false, "unknown_action", nil
+		return false, "Unknown action. Use: facilities, list, cancel", nil
 	}
 }
 
@@ -720,18 +1242,47 @@ func nullInt(v int64) any {
 
 func (s *Service) FCMRegister(ctx context.Context, body map[string]any) (bool, string, any) {
 	action := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["action"])))
+	if action == "" {
+		action = "register"
+	}
 	token := strings.TrimSpace(fmt.Sprint(body["token"]))
 	if action == "unregister" {
+		if token == "" {
+			return false, "token required.", nil
+		}
 		_, _ = s.DB.ExecContext(ctx, `DELETE FROM app_fcm_devices WHERE token=$1`, token)
-		_, _ = s.DB.ExecContext(ctx, `UPDATE device_tokens SET status='inactive', updated_at=NOW() WHERE token=$1`, token)
-		return true, "OK", nil
+		_, _ = s.DB.ExecContext(ctx, `UPDATE device_tokens SET status='disabled', updated_at=NOW() WHERE token=$1`, token)
+		return true, "Token removed.", nil
+	}
+	if action == "status" {
+		uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
+		tokenCount := 0
+		if uid > 0 {
+			_ = s.DB.QueryRowContext(ctx, `
+SELECT COUNT(DISTINCT token) FROM app_fcm_devices WHERE user_id=$1 AND token<>''`, uid).Scan(&tokenCount)
+		}
+		s.ensureFCMAudienceMap(ctx)
+		return true, "OK", map[string]any{
+			"tokenTable":      true,
+			"tokensForUser":   tokenCount,
+			"audienceMapRows": s.audienceMapCount(ctx, uid),
+			"roleRows":        s.audienceMapCount(ctx, uid),
+		}
 	}
 	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
+	if uid <= 0 || token == "" {
+		return false, "userId and token are required.", nil
+	}
 	platform := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["platform"])))
 	if platform == "" {
 		platform = "android"
 	}
-	deviceID := fmt.Sprint(body["deviceId"])
+	deviceID := strField(body, "deviceId")
+	if deviceID == "" {
+		deviceID = strField(body, "device_id")
+	}
+	syncRoles := parseSyncRoles(body)
+	s.ensureFCMAudienceMap(ctx)
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO app_fcm_devices (user_id, token, platform, device_id, updated_at)
 VALUES ($1,$2,$3,$4,NOW())
@@ -741,47 +1292,120 @@ ON CONFLICT (token) DO UPDATE SET user_id=EXCLUDED.user_id, platform=EXCLUDED.pl
 		return false, err.Error(), nil
 	}
 	// Mirror into notifications.device_tokens so StrollX user_id push resolves.
-	if uid > 0 && token != "" {
-		_, _ = s.DB.ExecContext(ctx, `
+	_, _ = s.DB.ExecContext(ctx, `
 INSERT INTO device_tokens (user_id, token, platform, status)
 VALUES ($1, $2, $3, 'active')
 ON CONFLICT (user_id, token) DO UPDATE
 SET platform=EXCLUDED.platform, status='active', updated_at=NOW()`,
-			uid, token, platform)
+		uid, token, platform)
+
+	s.upsertFCMAudience(ctx, fcmAudienceUser, uid, uid, "")
+	if syncRoles {
+		s.syncAudienceForUser(ctx, uid)
 	}
-	return true, "Registered", map[string]any{"ok": true}
+	tokenRows := 0
+	_ = s.DB.QueryRowContext(ctx, `
+SELECT COUNT(DISTINCT token) FROM app_fcm_devices WHERE user_id=$1 AND token<>''`, uid).Scan(&tokenRows)
+	audienceRows := s.audienceMapCount(ctx, uid)
+	return true, "FCM token registered.", map[string]any{
+		"ok":              true,
+		"userId":          uid,
+		"userType":        fcmAudienceUser,
+		"deviceTokens":    tokenRows,
+		"audienceMapRows": audienceRows,
+		"roleRows":        audienceRows,
+		"syncRoles":       syncRoles,
+	}
 }
 
 func (s *Service) AppNotifications(ctx context.Context, body map[string]any) (bool, string, any) {
 	action := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["action"])))
 	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
-	if action == "mark_seen" || action == "seen" {
-		_, _ = s.DB.ExecContext(ctx, `UPDATE app_notifications SET seen=TRUE WHERE user_id=$1`, uid)
-		return true, "OK", nil
+	if uid <= 0 {
+		if v, ok := parseInt64Field(body, "user_id"); ok {
+			uid = v
+		}
 	}
+	s.ensureNotificationSoftDelete(ctx)
+
+	if action == "delete" || action == "remove" {
+		if uid <= 0 {
+			return false, "userId required.", nil
+		}
+		deleteAll := body["deleteAll"] == true || fmt.Sprint(body["deleteAll"]) == "true" ||
+			body["markAll"] == true || fmt.Sprint(body["markAll"]) == "true"
+		ids := notificationIDsFromBody(body)
+		n, err := s.softDeleteNotifications(ctx, uid, ids, deleteAll)
+		if err != nil {
+			return false, err.Error(), nil
+		}
+		return true, "Deleted.", map[string]any{"ok": true, "deleted": n}
+	}
+
+	if action == "mark_seen" || action == "seen" {
+		markAll := body["markAll"] == true || fmt.Sprint(body["markAll"]) == "true"
+		if markAll {
+			_, _ = s.DB.ExecContext(ctx, `
+UPDATE app_notifications SET seen=TRUE
+WHERE user_id=$1 AND deleted_at IS NULL`, uid)
+			return true, "OK", map[string]any{"ok": true}
+		}
+		if raw, ok := body["items"].([]any); ok && len(raw) > 0 {
+			ids := []int64{}
+			for _, row := range raw {
+				m, _ := row.(map[string]any)
+				if m == nil {
+					continue
+				}
+				id, _ := strconv.ParseInt(fmt.Sprint(m["id"]), 10, 64)
+				if id > 0 {
+					ids = append(ids, id)
+				}
+			}
+			for _, id := range ids {
+				_, _ = s.DB.ExecContext(ctx, `
+UPDATE app_notifications SET seen=TRUE
+WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL`, uid, id)
+			}
+			return true, "OK", map[string]any{"ok": true, "count": len(ids)}
+		}
+		_, _ = s.DB.ExecContext(ctx, `
+UPDATE app_notifications SET seen=TRUE
+WHERE user_id=$1 AND deleted_at IS NULL`, uid)
+		return true, "OK", map[string]any{"ok": true}
+	}
+
+	sinceID, _ := strconv.ParseInt(fmt.Sprint(body["sinceEventId"]), 10, 64)
+	if sinceID == 0 {
+		sinceID, _ = strconv.ParseInt(fmt.Sprint(body["since_event_id"]), 10, 64)
+	}
+
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT id, user_id, facility_id, booking_id, ntype, title, body, facility_name, facility_logo,
        seen, source, meta_json, created_at, expires_at
 FROM app_notifications WHERE user_id=$1
+  AND deleted_at IS NULL
   AND (expires_at IS NULL OR expires_at > NOW())
-ORDER BY created_at DESC LIMIT 100`, uid)
+  AND ($2 <= 0 OR id > $2)
+ORDER BY created_at DESC LIMIT 100`, uid, sinceID)
 	if err != nil {
 		return false, err.Error(), nil
 	}
 	defer rows.Close()
 	items := []map[string]any{}
+	events := []map[string]any{}
 	unread := 0
 	var latest int64
 	for rows.Next() {
 		var id, userID int64
 		var fid sql.NullInt64
 		var bookingID sql.NullString
-		var ntype, title, body, fname, flogo, source string
+		var ntype, title, nbody, fname, flogo, source string
 		var seen bool
 		var meta []byte
 		var created time.Time
 		var expires sql.NullTime
-		_ = rows.Scan(&id, &userID, &fid, &bookingID, &ntype, &title, &body, &fname, &flogo, &seen, &source, &meta, &created, &expires)
+		_ = rows.Scan(&id, &userID, &fid, &bookingID, &ntype, &title, &nbody, &fname, &flogo, &seen, &source, &meta, &created, &expires)
 		if id > latest {
 			latest = id
 		}
@@ -789,9 +1413,11 @@ ORDER BY created_at DESC LIMIT 100`, uid)
 			unread++
 		}
 		item := map[string]any{
-			"id": id, "userId": userID, "type": ntype, "title": title, "body": body,
+			"id": id, "userId": userID, "type": ntype, "title": title, "body": nbody,
 			"facilityName": fname, "facilityLogoUrl": flogo, "seen": seen, "source": source,
-			"createdAt": created.Format(time.RFC3339), "meta": json.RawMessage(meta),
+			"createdAt": created.Format(time.RFC3339),
+			"createdAtLabel": created.Local().Format("02 Jan, 3:04 PM"),
+			"meta": json.RawMessage(meta),
 		}
 		if fid.Valid {
 			item["facilityId"] = fid.Int64
@@ -800,6 +1426,16 @@ ORDER BY created_at DESC LIMIT 100`, uid)
 			item["bookingId"] = bookingID.String
 		}
 		items = append(items, item)
+		events = append(events, map[string]any{
+			"eventId": id, "id": id, "type": ntype, "title": title, "body": nbody,
+			"createdAt": created.Format(time.RFC3339),
+		})
+	}
+	if action == "poll" {
+		return true, "OK", map[string]any{
+			"hasNew": len(events) > 0, "latestEventId": latest, "unreadCount": unread,
+			"events": events,
+		}
 	}
 	return true, "OK", map[string]any{
 		"notifications": items, "unreadCount": unread, "latestEventId": latest, "days": 7,
@@ -811,32 +1447,34 @@ func (s *Service) LiveArena(ctx context.Context, action string, q map[string]str
 	case "ping":
 		return true, "OK", map[string]any{"file": "live_arena", "php": "go-app"}
 	case "list":
-		rows, err := s.DB.QueryContext(ctx, `
-SELECT id, tournament_name, tournament_date::text, facility_id, sport_name, categories::text, open_match_count
-FROM app_live_tournaments ORDER BY tournament_date DESC`)
-		if err != nil {
-			return false, err.Error(), nil
-		}
-		defer rows.Close()
-		list := []map[string]any{}
-		for rows.Next() {
-			var id, fid int64
-			var name, date, sport string
-			var open int
-			var catStr string
-			_ = rows.Scan(&id, &name, &date, &fid, &sport, &catStr, &open)
-			cats := parsePgTextArray(catStr)
-			var fname string
-			_ = s.DB.QueryRowContext(ctx, `SELECT name FROM app_facilities WHERE id=$1`, fid).Scan(&fname)
-			list = append(list, map[string]any{
-				"tourId": id, "tournamentName": name, "tournamentDate": date,
-				"facilityId": fid, "facilityName": fname, "facilityLogoUrl": "",
-				"sportName": sport, "categories": cats, "openMatchCount": open,
-			})
-		}
+		s.syncLiveFromTournaments(ctx)
+		list := s.liveArenaList(ctx)
 		return true, "OK", map[string]any{"tournaments": list}
 	case "board":
+		s.syncLiveFromTournaments(ctx)
 		tid, _ := strconv.ParseInt(q["tourId"], 10, 64)
+		category := strings.TrimSpace(q["category"])
+		if name, sport, fname, fid, matches, afterID, ok := s.liveBoardFromTournaments(ctx, tid, category); ok {
+			cats := []string{}
+			seen := map[string]struct{}{}
+			for _, m := range matches {
+				c := strings.TrimSpace(fmt.Sprint(m["category"]))
+				if c == "" {
+					continue
+				}
+				if _, e := seen[c]; e {
+					continue
+				}
+				seen[c] = struct{}{}
+				cats = append(cats, c)
+			}
+			_ = fid
+			return true, "OK", map[string]any{
+				"tourId": tid, "tournamentName": name, "facilityName": fname, "sportName": sport,
+				"category": category, "categories": cats, "afterId": afterID, "matches": matches,
+				"source": "tournaments",
+			}
+		}
 		var name, sport string
 		var fid int64
 		_ = s.DB.QueryRowContext(ctx, `
@@ -844,9 +1482,16 @@ SELECT tournament_name, facility_id, sport_name FROM app_live_tournaments WHERE 
 			Scan(&name, &fid, &sport)
 		var fname string
 		_ = s.DB.QueryRowContext(ctx, `SELECT name FROM app_facilities WHERE id=$1`, fid).Scan(&fname)
-		rows, err := s.DB.QueryContext(ctx, `
+		qMatch := `
 SELECT id, category, gender, player1, player2, status, winner, court, score1, score2
-FROM app_live_matches WHERE tour_id=$1 ORDER BY id`, tid)
+FROM app_live_matches WHERE tour_id=$1`
+		args := []any{tid}
+		if category != "" {
+			qMatch += ` AND category=$2`
+			args = append(args, category)
+		}
+		qMatch += ` ORDER BY id`
+		rows, err := s.DB.QueryContext(ctx, qMatch, args...)
 		if err != nil {
 			return false, err.Error(), nil
 		}
@@ -869,11 +1514,42 @@ FROM app_live_matches WHERE tour_id=$1 ORDER BY id`, tid)
 		}
 		return true, "OK", map[string]any{
 			"tourId": tid, "tournamentName": name, "facilityName": fname, "sportName": sport,
-			"category": q["category"], "categories": []string{}, "afterId": afterID, "matches": matches,
+			"category": category, "categories": []string{}, "afterId": afterID, "matches": matches,
+			"source": "app_live",
 		}
 	default:
 		return false, "unknown_action", nil
 	}
+}
+
+func (s *Service) liveArenaList(ctx context.Context) []map[string]any {
+	list := []map[string]any{}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT id, tournament_name, tournament_date::text, facility_id, sport_name, categories::text, open_match_count
+FROM app_live_tournaments ORDER BY tournament_date DESC, id DESC`)
+	if err != nil {
+		return list
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, fid int64
+		var name, date, sport string
+		var open int
+		var catStr string
+		_ = rows.Scan(&id, &name, &date, &fid, &sport, &catStr, &open)
+		cats := parsePgTextArray(catStr)
+		var fname string
+		_ = s.DB.QueryRowContext(ctx, `SELECT COALESCE(name,'') FROM app_facilities WHERE id=$1`, fid).Scan(&fname)
+		if fname == "" {
+			_ = s.DB.QueryRowContext(ctx, `SELECT COALESCE(name,'') FROM facilities WHERE id=$1`, fid).Scan(&fname)
+		}
+		list = append(list, map[string]any{
+			"tourId": id, "tournamentName": name, "tournamentDate": date,
+			"facilityId": fid, "facilityName": fname, "facilityLogoUrl": "",
+			"sportName": sport, "categories": cats, "openMatchCount": open,
+		})
+	}
+	return list
 }
 
 func parsePgTextArray(s string) []string {
@@ -899,20 +1575,66 @@ func (s *Service) ScoreLive(ctx context.Context, action string, q map[string]str
 	case "ping_public", "ping":
 		return true, "OK", map[string]any{"ok": true}
 	case "since_public", "since":
+		s.syncLiveFromTournaments(ctx)
 		after, _ := strconv.ParseInt(q["afterId"], 10, 64)
 		mid, _ := strconv.ParseInt(q["matchId"], 10, 64)
+		tourID, _ := strconv.ParseInt(q["tourId"], 10, 64)
+		// Prefer tournament_score_events when present.
+		if s.tableExists(ctx, "tournament_score_events") {
+			var eid, matchID int64
+			var s1, s2 int
+			var status, winner sql.NullString
+			err := s.DB.QueryRowContext(ctx, `
+SELECT id, match_id, COALESCE(score1,0), COALESCE(score2,0), status, winner
+FROM tournament_score_events
+WHERE ($1=0 OR tournament_id=$1)
+  AND ($2=0 OR match_id=$2)
+  AND id > $3
+ORDER BY id DESC LIMIT 1`, tourID, mid, after).Scan(&eid, &matchID, &s1, &s2, &status, &winner)
+			if err == nil {
+				ev := map[string]any{"matchId": matchID, "score1": s1, "score2": s2, "eventId": eid}
+				if status.Valid {
+					ev["status"] = status.String
+				}
+				if winner.Valid {
+					ev["winner"] = winner.String
+				}
+				return true, "OK", map[string]any{
+					"changed": true, "version": eid, "matchId": matchID, "score1": s1, "score2": s2,
+					"events": []map[string]any{ev}, "afterId": eid, "source": "tournament_score_events",
+				}
+			}
+		}
 		var id int64
 		var s1, s2 int
 		var ver int64
 		err := s.DB.QueryRowContext(ctx, `
 SELECT id, score1, score2, version FROM app_live_matches
-WHERE ($1=0 OR id=$1) AND id > $2 ORDER BY id DESC LIMIT 1`, mid, after).Scan(&id, &s1, &s2, &ver)
+WHERE ($1=0 OR id=$1) AND ($2=0 OR tour_id=$2) AND id > $3
+ORDER BY version DESC, id DESC LIMIT 1`, mid, tourID, after).Scan(&id, &s1, &s2, &ver)
 		if err != nil {
+			// Also peek tournament_fixtures updates by id.
+			if mid > 0 {
+				var fs1, fs2 int
+				var st string
+				err2 := s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(score1,0), COALESCE(score2,0), COALESCE(status,'')
+FROM tournament_fixtures WHERE id=$1`, mid).Scan(&fs1, &fs2, &st)
+				if err2 == nil {
+					return true, "OK", map[string]any{
+						"changed": true, "version": mid, "matchId": mid, "score1": fs1, "score2": fs2,
+						"status": mapFixtureStatus(st),
+						"events": []map[string]any{{"matchId": mid, "score1": fs1, "score2": fs2}},
+						"afterId": mid, "source": "tournament_fixtures",
+					}
+				}
+			}
 			return true, "OK", map[string]any{"changed": false, "version": 0}
 		}
 		return true, "OK", map[string]any{
 			"changed": true, "version": ver, "matchId": id, "score1": s1, "score2": s2,
 			"events": []map[string]any{{"matchId": id, "score1": s1, "score2": s2}}, "afterId": id,
+			"source": "app_live_matches",
 		}
 	case "wait_public", "wait":
 		return s.ScoreLive(ctx, "since_public", q)
@@ -924,6 +1646,8 @@ WHERE ($1=0 OR id=$1) AND id > $2 ORDER BY id DESC LIMIT 1`, mid, after).Scan(&i
 func (s *Service) ScoreFollows(ctx context.Context, body map[string]any) (bool, string, any) {
 	action := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["action"])))
 	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
+	targetType := firstNonEmpty(fmt.Sprint(body["targetType"]), fmt.Sprint(body["target_type"]))
+	targetKey := firstNonEmpty(fmt.Sprint(body["targetKey"]), fmt.Sprint(body["target_key"]))
 	switch action {
 	case "prefs_get":
 		var my, fr bool
@@ -942,39 +1666,70 @@ ON CONFLICT (user_id) DO UPDATE SET my_matches=$2, friend_matches=$3`, uid, my, 
 	case "follow":
 		tid, _ := strconv.ParseInt(fmt.Sprint(body["tourId"]), 10, 64)
 		mid, _ := strconv.ParseInt(fmt.Sprint(body["matchId"]), 10, 64)
-		tt := fmt.Sprint(body["target_type"])
-		tk := fmt.Sprint(body["target_key"])
+		if strings.EqualFold(targetType, "match") && mid <= 0 {
+			mid, _ = strconv.ParseInt(targetKey, 10, 64)
+		}
 		_, _ = s.DB.ExecContext(ctx, `
 INSERT INTO app_score_follows (user_id, tour_id, match_id, target_type, target_key)
-VALUES ($1,$2,$3,$4,$5)`, uid, tid, mid, tt, tk)
+VALUES ($1,$2,$3,$4,$5)`, uid, tid, mid, targetType, targetKey)
 		return true, "OK", nil
 	case "unfollow":
+		tid, _ := strconv.ParseInt(fmt.Sprint(body["tourId"]), 10, 64)
 		mid, _ := strconv.ParseInt(fmt.Sprint(body["matchId"]), 10, 64)
-		_, _ = s.DB.ExecContext(ctx, `DELETE FROM app_score_follows WHERE user_id=$1 AND match_id=$2`, uid, mid)
+		if targetKey != "" {
+			_, _ = s.DB.ExecContext(ctx, `
+DELETE FROM app_score_follows WHERE user_id=$1
+  AND ($2=0 OR tour_id=$2)
+  AND target_key=$3
+  AND ($4='' OR target_type=$4)`, uid, tid, targetKey, targetType)
+		} else if mid > 0 {
+			_, _ = s.DB.ExecContext(ctx, `DELETE FROM app_score_follows WHERE user_id=$1 AND match_id=$2`, uid, mid)
+		}
 		return true, "OK", nil
 	case "status_for_match":
+		tid, _ := strconv.ParseInt(fmt.Sprint(body["tourId"]), 10, 64)
 		mid, _ := strconv.ParseInt(fmt.Sprint(body["matchId"]), 10, 64)
-		var n int
-		_ = s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM app_score_follows WHERE user_id=$1 AND match_id=$2`, uid, mid).Scan(&n)
-		prefs, _, pdata := s.ScoreFollows(ctx, map[string]any{"action": "prefs_get", "userId": uid})
-		_ = prefs
+		side1 := firstNonEmpty(fmt.Sprint(body["side1Key"]), fmt.Sprint(body["side1_key"]))
+		side2 := firstNonEmpty(fmt.Sprint(body["side2Key"]), fmt.Sprint(body["side2_key"]))
+		var watch int
+		_ = s.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM app_score_follows
+WHERE user_id=$1 AND (
+  (match_id=$2 AND $2>0) OR (target_type='match' AND target_key=$3)
+)`, uid, mid, fmt.Sprint(mid)).Scan(&watch)
+		var follow1, follow2 int
+		if side1 != "" {
+			_ = s.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM app_score_follows
+WHERE user_id=$1 AND ($2=0 OR tour_id=$2) AND target_key=$3`, uid, tid, side1).Scan(&follow1)
+		}
+		if side2 != "" {
+			_ = s.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM app_score_follows
+WHERE user_id=$1 AND ($2=0 OR tour_id=$2) AND target_key=$3`, uid, tid, side2).Scan(&follow2)
+		}
+		_, _, pdata := s.ScoreFollows(ctx, map[string]any{"action": "prefs_get", "userId": uid})
 		return true, "OK", map[string]any{
-			"signedIn": uid > 0, "watchMatch": n > 0,
-			"followPlayer1": false, "followPlayer2": false,
-			"side1Key": "", "side2Key": "", "prefs": pdata,
+			"signedIn": uid > 0, "watchMatch": watch > 0,
+			"followPlayer1": follow1 > 0, "followPlayer2": follow2 > 0,
+			"side1Key": side1, "side2Key": side2, "prefs": pdata,
 		}
 	case "list":
 		rows, err := s.DB.QueryContext(ctx, `
-SELECT target_type, target_key FROM app_score_follows WHERE user_id=$1`, uid)
+SELECT tour_id, match_id, target_type, target_key FROM app_score_follows WHERE user_id=$1`, uid)
 		if err != nil {
 			return false, err.Error(), nil
 		}
 		defer rows.Close()
 		list := []map[string]any{}
 		for rows.Next() {
+			var tid, mid int64
 			var tt, tk string
-			_ = rows.Scan(&tt, &tk)
-			list = append(list, map[string]any{"target_type": tt, "target_key": tk})
+			_ = rows.Scan(&tid, &mid, &tt, &tk)
+			list = append(list, map[string]any{
+				"tourId": tid, "matchId": mid, "target_type": tt, "targetType": tt,
+				"target_key": tk, "targetKey": tk,
+			})
 		}
 		return true, "OK", map[string]any{"follows": list}
 	default:
@@ -984,74 +1739,17 @@ SELECT target_type, target_key FROM app_score_follows WHERE user_id=$1`, uid)
 
 func (s *Service) StudentPortal(ctx context.Context, body map[string]any) (bool, string, any) {
 	action := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["action"])))
-	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
 	switch action {
 	case "my_enrollments":
-		rows, err := s.DB.QueryContext(ctx, `
-SELECT e.id, e.student_id, e.student_name, e.level, e.status, e.plan_id, e.plan_name,
-       e.facility_id, COALESCE(f.name,''), COALESCE(f.logo_url,''), e.sport_id, e.sport_name
-FROM app_student_enrollments e
-LEFT JOIN app_facilities f ON f.id=e.facility_id
-WHERE e.user_id=$1`, uid)
-		if err != nil {
-			return false, err.Error(), nil
-		}
-		defer rows.Close()
-		list := []map[string]any{}
-		month := time.Now().Format("2006-01")
-		for rows.Next() {
-			var id, sid, planID, fid, sportID int64
-			var sname, level, status, planName, fname, logo, sportName string
-			_ = rows.Scan(&id, &sid, &sname, &level, &status, &planID, &planName, &fid, &fname, &logo, &sportID, &sportName)
-			var present, absent int
-			_ = s.DB.QueryRowContext(ctx, `
-SELECT COUNT(*) FILTER (WHERE status='present'), COUNT(*) FILTER (WHERE status='absent')
-FROM app_student_attendance WHERE enrollment_id=$1 AND to_char(attend_date,'YYYY-MM')=$2`, id, month).
-				Scan(&present, &absent)
-			list = append(list, map[string]any{
-				"enrollmentId": id, "studentId": sid, "studentName": sname, "level": level, "status": status,
-				"planId": planID, "planName": planName, "facilityId": fid, "facilityName": fname,
-				"facilityLogoUrl": logo, "sportId": sportID, "sportName": sportName,
-				"currentMonth": month, "presentCount": present, "absentCount": absent,
-			})
-		}
-		return true, "OK", map[string]any{"enrollments": list}
+		return s.studentPortalMyEnrollments(ctx, body)
 	case "reports":
-		eid, _ := strconv.ParseInt(fmt.Sprint(body["enrollmentId"]), 10, 64)
-		return true, "OK", map[string]any{
-			"enrollment": map[string]any{"enrollmentId": eid},
-			"reports":    []map[string]any{},
-		}
+		return s.studentPortalReports(ctx, body)
 	case "month_calendar":
-		eid, _ := strconv.ParseInt(fmt.Sprint(body["enrollmentId"]), 10, 64)
-		ym := strings.TrimSpace(fmt.Sprint(body["yearMonth"]))
-		if ym == "" {
-			ym = time.Now().Format("2006-01")
-		}
-		return true, "OK", map[string]any{
-			"enrollment": map[string]any{"enrollmentId": eid},
-			"yearMonth": ym, "label": ym, "isCurrentMonth": ym == time.Now().Format("2006-01"),
-			"presentCount": 0, "absentCount": 0, "days": []any{},
-			"availableMonths": []map[string]any{{"yearMonth": ym, "label": ym, "isCurrent": true}},
-		}
+		return s.studentPortalMonthCalendar(ctx, body)
 	case "leave_request":
-		eid, _ := strconv.ParseInt(fmt.Sprint(body["enrollmentId"]), 10, 64)
-		date := fmt.Sprint(body["leaveDate"])
-		reason := fmt.Sprint(body["reason"])
-		_, err := s.DB.ExecContext(ctx, `
-INSERT INTO app_student_attendance (enrollment_id, attend_date, status, leave_reason)
-VALUES ($1,$2::date,'leave',$3)
-ON CONFLICT (enrollment_id, attend_date) DO UPDATE SET status='leave', leave_reason=$3`, eid, date, reason)
-		if err != nil {
-			return false, err.Error(), nil
-		}
-		return true, "Leave requested", nil
+		return s.studentPortalLeaveRequest(ctx, body)
 	case "cancel_leave":
-		eid, _ := strconv.ParseInt(fmt.Sprint(body["enrollmentId"]), 10, 64)
-		date := fmt.Sprint(body["leaveDate"])
-		_, _ = s.DB.ExecContext(ctx, `
-DELETE FROM app_student_attendance WHERE enrollment_id=$1 AND attend_date=$2::date AND status='leave'`, eid, date)
-		return true, "Cancelled", nil
+		return s.studentPortalCancelLeave(ctx, body)
 	default:
 		return false, "unknown_action", nil
 	}
@@ -1059,178 +1757,17 @@ DELETE FROM app_student_attendance WHERE enrollment_id=$1 AND attend_date=$2::da
 
 func (s *Service) PrimaryMembers(ctx context.Context, body map[string]any) (bool, string, any) {
 	action := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["action"])))
-	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
 	switch action {
 	case "my_plans":
-		rows, err := s.DB.QueryContext(ctx, `
-SELECT p.id, p.membership_id, p.member_id, p.member_name, p.plan_id, p.facility_id,
-       COALESCE(f.name,''), COALESCE(f.logo_url,''), p.sport_id, p.sport_name, p.plan_name,
-       p.sub_facility_name, p.slot_time, p.indiv_price, p.grp_price, p.subscription_type,
-       p.max_member_count, p.current_member_count, p.team_name, p.subscription_fee, p.is_primary
-FROM app_member_plans p
-LEFT JOIN app_facilities f ON f.id=p.facility_id
-WHERE p.user_id=$1`, uid)
-		if err != nil {
-			return false, err.Error(), nil
-		}
-		defer rows.Close()
-		list := []map[string]any{}
-		for rows.Next() {
-			var id, mid, memberID, planID, fid, sportID int64
-			var mname, fname, logo, sportName, planName, sub, slot, subType, team string
-			var indiv, grp, fee float64
-			var maxC, curC int
-			var primary bool
-			_ = rows.Scan(&id, &mid, &memberID, &mname, &planID, &fid, &fname, &logo, &sportID, &sportName, &planName,
-				&sub, &slot, &indiv, &grp, &subType, &maxC, &curC, &team, &fee, &primary)
-			if mid == 0 {
-				mid = id
-			}
-			list = append(list, map[string]any{
-				"membershipId": mid, "memberId": memberID, "memberName": mname, "planId": planID,
-				"facilityId": fid, "facilityName": fname, "facilityLogoUrl": logo,
-				"sportId": sportID, "sportName": sportName, "planName": planName,
-				"subFacilityName": sub, "slotTime": slot, "indiv_price": indiv, "grp_price": grp,
-				"subscription_type": subType, "max_member_count": maxC, "current_member_count": curC,
-				"teamName": team, "subscriptionFee": fee, "isPrimary": primary, "primaryMember": primary,
-			})
-		}
-		return true, "OK", map[string]any{"plans": list}
+		return s.primaryMembersMyPlans(ctx, body)
 	case "plan_members":
-		mid, _ := strconv.ParseInt(fmt.Sprint(body["membershipId"]), 10, 64)
-		rows, err := s.DB.QueryContext(ctx, `
-SELECT membership_id, member_id, member_name, whatsapp_number, is_primary, user_id= $2 AS is_mine,
-       status_label, coming_today FROM app_member_plans
-WHERE membership_id=$1 OR id=$1 OR plan_id=(SELECT plan_id FROM app_member_plans WHERE id=$1 OR membership_id=$1 LIMIT 1)`, mid, uid)
-		if err != nil {
-			return false, err.Error(), nil
-		}
-		defer rows.Close()
-		members := []map[string]any{}
-		myIDs := []int64{}
-		coming := 0
-		viewerPrimary := false
-		for rows.Next() {
-			var membershipID, memberID int64
-			var mname, wa, status string
-			var primary, isMine, comingToday bool
-			_ = rows.Scan(&membershipID, &memberID, &mname, &wa, &primary, &isMine, &status, &comingToday)
-			if comingToday {
-				coming++
-			}
-			if isMine {
-				myIDs = append(myIDs, membershipID)
-				if primary {
-					viewerPrimary = true
-				}
-			}
-			members = append(members, map[string]any{
-				"membershipId": membershipID, "memberId": memberID, "memberName": mname,
-				"whatsappNumber": wa, "isPrimary": primary, "isMine": isMine,
-				"statusLabel": status, "canSelect": true, "request_status": "",
-				"comingToday": comingToday, "canToggleComing": isMine || viewerPrimary,
-			})
-		}
-		return true, "OK", map[string]any{
-			"plan": map[string]any{"membershipId": mid}, "members": members,
-			"myMembershipIds": myIDs, "isViewerPrimary": viewerPrimary,
-			"playDate": time.Now().Format("2006-01-02"), "comingTodayCount": coming,
-		}
+		return s.primaryMembersPlanMembers(ctx, body)
 	case "toggle_coming_today":
-		mid, _ := strconv.ParseInt(fmt.Sprint(body["membershipId"]), 10, 64)
-		_, _ = s.DB.ExecContext(ctx, `
-UPDATE app_member_plans SET coming_today = NOT coming_today WHERE membership_id=$1 OR id=$1`, mid)
-		return true, "OK", nil
+		return s.primaryMembersToggleComing(ctx, body)
 	case "add_member":
-		name := strings.TrimSpace(fmt.Sprint(body["memberName"]))
-		wa := normalizeWA(fmt.Sprint(body["whatsappNumber"]))
-		fid, _ := strconv.ParseInt(fmt.Sprint(body["facilityId"]), 10, 64)
-		_, err := s.DB.ExecContext(ctx, `
-INSERT INTO app_member_plans (user_id, membership_id, member_id, member_name, facility_id, whatsapp_number, is_primary)
-VALUES ($1, nextval('app_member_plans_id_seq'), nextval('app_member_plans_id_seq'), $2, $3, $4, FALSE)`,
-			uid, name, fid, wa)
-		if err != nil {
-			return false, err.Error(), nil
-		}
-		return true, "Added", nil
+		return s.primaryMembersAddMember(ctx, body)
 	case "submit_request":
-		return true, "Submitted", nil
-	default:
-		return false, "unknown_action", nil
-	}
-}
-
-func (s *Service) BillingPortal(ctx context.Context, body map[string]any) (bool, string, any) {
-	action := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["action"])))
-	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
-	switch action {
-	case "my_bills":
-		rows, err := s.DB.QueryContext(ctx, `
-SELECT b.id, b.enrollment_id, b.bill_type, b.bill_amount, b.paid_amount, b.billing_month,
-       b.due_date::text, b.payment_status, b.plan_name, b.display_name, b.facility_id,
-       COALESCE(f.name,''), COALESCE(f.logo_url,''), b.transaction_id
-FROM app_fee_bills b
-LEFT JOIN app_facilities f ON f.id=b.facility_id
-WHERE b.user_id=$1 ORDER BY b.created_at DESC`, uid)
-		if err != nil {
-			return false, err.Error(), nil
-		}
-		defer rows.Close()
-		bills := []map[string]any{}
-		pendingCount, paidCount := 0, 0
-		pendingTotal := 0.0
-		facMap := map[int64]map[string]any{}
-		for rows.Next() {
-			var id, eid, fid int64
-			var btype, month, due, status, plan, display, fname, logo, txn string
-			var amount, paid float64
-			_ = rows.Scan(&id, &eid, &btype, &amount, &paid, &month, &due, &status, &plan, &display, &fid, &fname, &logo, &txn)
-			bal := amount - paid
-			isPaid := status == "paid" || bal <= 0
-			if isPaid {
-				paidCount++
-			} else {
-				pendingCount++
-				pendingTotal += bal
-			}
-			bills = append(bills, map[string]any{
-				"billId": id, "enrollmentId": eid, "type": btype, "audience": btype,
-				"billAmount": amount, "paidAmount": paid, "balanceDue": bal,
-				"billingMonth": month, "billingMonthLabel": month, "dueDate": due,
-				"paymentStatus": status, "isPaid": isPaid, "canPayOnline": !isPaid,
-				"paymentMethod": "", "transactionId": txn, "facilityId": fid,
-				"facilityName": fname, "facilityLogoUrl": logo, "planName": plan, "displayName": display,
-			})
-			if _, ok := facMap[fid]; !ok {
-				facMap[fid] = map[string]any{
-					"facilityId": fid, "facilityName": fname, "facilityLogoUrl": logo,
-					"pendingCount": 0, "pendingTotal": 0.0, "payUrl": "",
-				}
-			}
-			if !isPaid {
-				facMap[fid]["pendingCount"] = facMap[fid]["pendingCount"].(int) + 1
-				facMap[fid]["pendingTotal"] = facMap[fid]["pendingTotal"].(float64) + bal
-			}
-		}
-		facilities := []map[string]any{}
-		for _, v := range facMap {
-			facilities = append(facilities, v)
-		}
-		return true, "OK", map[string]any{
-			"bills": bills, "facilities": facilities,
-			"pendingCount": pendingCount, "paidCount": paidCount, "pendingTotal": pendingTotal,
-		}
-	case "pay_url":
-		return true, "OK", map[string]any{"payUrl": ""}
-	case "initiate_payment":
-		orderID := fmt.Sprintf("fee_order_%d_%d", uid, time.Now().Unix())
-		amount, _ := strconv.ParseFloat(fmt.Sprint(body["amount"]), 64)
-		return true, "OK", map[string]any{
-			"orderId": orderID, "keyId": s.Cfg.RazorpayKeyID, "amount": amount,
-			"currency": "INR", "category": "FEES", "billIds": body["billIds"],
-		}
-	case "confirm_payment":
-		return true, "Paid", map[string]any{"ok": true}
+		return s.primaryMembersSubmitRequest(ctx, body)
 	default:
 		return false, "unknown_action", nil
 	}

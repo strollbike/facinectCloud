@@ -1,0 +1,97 @@
+-- Onboard facilities 20 & 28 from dump.sql (full local catalog)
+BEGIN;
+ALTER TABLE facility_sports ADD COLUMN IF NOT EXISTS catalog_sport_id BIGINT NULL;
+ALTER TABLE facility_whatsapp_config ALTER COLUMN whatsapp_api_token TYPE TEXT;
+
+-- app_sports
+INSERT INTO app_sports (id, name) OVERRIDING SYSTEM VALUE VALUES (1, 'Badminton') ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name;
+INSERT INTO app_sports (id, name) OVERRIDING SYSTEM VALUE VALUES (2, 'Tennis') ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name;
+INSERT INTO app_sports (id, name) OVERRIDING SYSTEM VALUE VALUES (8, 'Volleyball') ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name;
+INSERT INTO app_sports (id, name) OVERRIDING SYSTEM VALUE VALUES (17, 'Bowling') ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name;
+SELECT setval(pg_get_serial_sequence('app_sports','id'), GREATEST((SELECT MAX(id) FROM app_sports), 1));
+
+-- facilities
+INSERT INTO facilities (id, name, slug, status) VALUES (20, 'strolllabstesting', 'strolllabstesting', 'active') ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, slug=EXCLUDED.slug, status=EXCLUDED.status, updated_at=NOW();
+INSERT INTO facilities (id, name, slug, status) VALUES (28, 'Drops N Smashes', 'drops-n-smashes', 'active') ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, slug=EXCLUDED.slug, status=EXCLUDED.status, updated_at=NOW();
+SELECT setval(pg_get_serial_sequence('facilities','id'), GREATEST((SELECT MAX(id) FROM facilities), 1));
+
+-- facility_profiles
+INSERT INTO facility_profiles (facility_id, display_name, location, city, phone, logo_url, map_url, open_time, close_time) VALUES (20, 'strolllabstesting', 'Bangalore', 'Bangalore', '+91 44 3564 6232', 'https://strollbike.com/Services/DnS/facilitiesLogo/28_logo.jpg', 'https://www.google.com/maps/dir//Drops+n+smashes,+256,+Velachery+Main+Rd,+East+Tambaram,+Tambaram,+Chennai,+Tamil+Nadu+600073/@12.9990656,80.2521088,14z/data=!4m8!4m7!1m0!1m5!1m1!1s0x3a525f553fe2c8b1:0xb4425a158a5695fd!2m2!1d80.1355032!2d12.9224915?entry=ttu&g_ep=EgoyMDI2MDQwNS4wIKXMDSoASAFQAw%3D%3D', NULL, NULL) ON CONFLICT (facility_id) DO UPDATE SET display_name=EXCLUDED.display_name, location=EXCLUDED.location, city=EXCLUDED.city, phone=EXCLUDED.phone, logo_url=EXCLUDED.logo_url, map_url=EXCLUDED.map_url, open_time=EXCLUDED.open_time, close_time=EXCLUDED.close_time, updated_at=NOW();
+INSERT INTO facility_profiles (facility_id, display_name, location, city, phone, logo_url, map_url, open_time, close_time) VALUES (28, 'Drops N Smashes', 'Drops n smashes256, Velachery Rd, East Tambaram, Tambaram, Chennai, Tamil Nadu 600073', 'Chennai', '+91 44 3556 1916', 'https://strollbike.com/Services/DnS/facilitiesLogo/28_logo.jpg', 'https://www.google.com/maps/dir//Drops+n+smashes,+256,+Velachery+Main+Rd,+East+Tambaram,+Tambaram,+Chennai,+Tamil+Nadu+600073/@12.9990656,80.2521088,14z/data=!4m8!4m7!1m0!1m5!1m1!1s0x3a525f553fe2c8b1:0xb4425a158a5695fd!2m2!1d80.1355032!2d12.9224915?entry=ttu&g_ep=EgoyMDI2MDQwNS4wIKXMDSoASAFQAw%3D%3D', NULL, NULL) ON CONFLICT (facility_id) DO UPDATE SET display_name=EXCLUDED.display_name, location=EXCLUDED.location, city=EXCLUDED.city, phone=EXCLUDED.phone, logo_url=EXCLUDED.logo_url, map_url=EXCLUDED.map_url, open_time=EXCLUDED.open_time, close_time=EXCLUDED.close_time, updated_at=NOW();
+
+-- facility_whatsapp_config
+INSERT INTO facility_whatsapp_config (facility_id, meta_phone_number_id, whatsapp_api_token, waba_id, whatsapp_enabled) VALUES (20, '1195344690327311', 'EAAVIoExeBBQBRR67T66D8tnMlHPRbSOZCvFLDZBJXMa8gZAOU13DC4bh7xwQtLyrvoe4Lt0YBh3L4Ys1d9DqZAQUxrjoCQZAnuztpM2rBTVPJkU57kgTYEgD3K9xZAv3VUatSIPZAfc6IUCHs6jhVKNoTVtiqieoepsDraGZCU1el4b6gK7Qv6l2P53bVZCa8twZDZD', '1087061690668415', TRUE) ON CONFLICT (facility_id) DO UPDATE SET meta_phone_number_id=EXCLUDED.meta_phone_number_id, whatsapp_api_token=EXCLUDED.whatsapp_api_token, waba_id=EXCLUDED.waba_id, whatsapp_enabled=EXCLUDED.whatsapp_enabled, updated_at=NOW();
+INSERT INTO facility_whatsapp_config (facility_id, meta_phone_number_id, whatsapp_api_token, waba_id, whatsapp_enabled) VALUES (28, '1317032261496899', 'EAAObQG8UQBsBPMuqSYoYFrDNShER12bmXs4ZC4ntMMfgiYmc2yFZCwEpgho6KQiU4r4otXgpLEMoEUMWMN8ihJWPYXdq55nC64eqbDdfc9PQCIxB6daaSW18Yj7ucmU9WgZCfcyqQxQXF2zMAdpMQiQTry9clX8ZAcQkZAGNMoMiJOjFOA0tQZAxtn1yLpZBXgEOQZDZD', '1422938799723213', TRUE) ON CONFLICT (facility_id) DO UPDATE SET meta_phone_number_id=EXCLUDED.meta_phone_number_id, whatsapp_api_token=EXCLUDED.whatsapp_api_token, waba_id=EXCLUDED.waba_id, whatsapp_enabled=EXCLUDED.whatsapp_enabled, updated_at=NOW();
+
+-- facility_service_flags
+INSERT INTO facility_service_flags (facility_id, staff_enabled, customer_enabled) VALUES (20, TRUE, TRUE) ON CONFLICT (facility_id) DO UPDATE SET staff_enabled=TRUE, customer_enabled=EXCLUDED.customer_enabled, updated_at=NOW();
+INSERT INTO facility_service_flags (facility_id, staff_enabled, customer_enabled) VALUES (28, TRUE, TRUE) ON CONFLICT (facility_id) DO UPDATE SET staff_enabled=TRUE, customer_enabled=EXCLUDED.customer_enabled, updated_at=NOW();
+
+-- facility_sport_payments
+INSERT INTO facility_sport_payments (facility_id, sport_id, allow_full_payment, allow_advance_payment, allow_spot_payment, advance_amount) VALUES (20, 0, TRUE, TRUE, TRUE, 100.0) ON CONFLICT (facility_id, sport_id) DO UPDATE SET allow_full_payment=EXCLUDED.allow_full_payment, allow_advance_payment=EXCLUDED.allow_advance_payment, allow_spot_payment=EXCLUDED.allow_spot_payment, advance_amount=EXCLUDED.advance_amount, updated_at=NOW();
+INSERT INTO facility_sport_payments (facility_id, sport_id, allow_full_payment, allow_advance_payment, allow_spot_payment, advance_amount) VALUES (28, 0, TRUE, TRUE, TRUE, 50.0) ON CONFLICT (facility_id, sport_id) DO UPDATE SET allow_full_payment=EXCLUDED.allow_full_payment, allow_advance_payment=EXCLUDED.allow_advance_payment, allow_spot_payment=EXCLUDED.allow_spot_payment, advance_amount=EXCLUDED.advance_amount, updated_at=NOW();
+
+-- facility_sports
+INSERT INTO facility_sports (facility_id, name, sort_order, status, catalog_sport_id) VALUES (20, 'Badminton', 0, 'active', 1) ON CONFLICT (facility_id, name) DO UPDATE SET status='active', sort_order=EXCLUDED.sort_order, catalog_sport_id=EXCLUDED.catalog_sport_id, updated_at=NOW();
+INSERT INTO facility_sports (facility_id, name, sort_order, status, catalog_sport_id) VALUES (20, 'Tennis', 1, 'active', 2) ON CONFLICT (facility_id, name) DO UPDATE SET status='active', sort_order=EXCLUDED.sort_order, catalog_sport_id=EXCLUDED.catalog_sport_id, updated_at=NOW();
+INSERT INTO facility_sports (facility_id, name, sort_order, status, catalog_sport_id) VALUES (20, 'Volleyball', 2, 'active', 8) ON CONFLICT (facility_id, name) DO UPDATE SET status='active', sort_order=EXCLUDED.sort_order, catalog_sport_id=EXCLUDED.catalog_sport_id, updated_at=NOW();
+INSERT INTO facility_sports (facility_id, name, sort_order, status, catalog_sport_id) VALUES (20, 'Bowling', 3, 'active', 17) ON CONFLICT (facility_id, name) DO UPDATE SET status='active', sort_order=EXCLUDED.sort_order, catalog_sport_id=EXCLUDED.catalog_sport_id, updated_at=NOW();
+INSERT INTO facility_sports (facility_id, name, sort_order, status, catalog_sport_id) VALUES (28, 'Badminton', 0, 'active', 1) ON CONFLICT (facility_id, name) DO UPDATE SET status='active', sort_order=EXCLUDED.sort_order, catalog_sport_id=EXCLUDED.catalog_sport_id, updated_at=NOW();
+
+DELETE FROM facility_sport_schedules WHERE facility_id IN (20,28);
+DELETE FROM facility_courts WHERE facility_id IN (20,28);
+
+-- facility_courts
+INSERT INTO facility_courts (facility_id, sport_id, name, price_per_hour, open_time, close_time, status) SELECT 20, fs.id, 'Bengaluru', 160.0, '00:00:00', '23:59:00', 'active' FROM facility_sports fs WHERE fs.facility_id=20 AND fs.catalog_sport_id=1 ORDER BY fs.id LIMIT 1;
+INSERT INTO facility_courts (facility_id, sport_id, name, price_per_hour, open_time, close_time, status) SELECT 28, fs.id, 'Court A', 350.0, '04:00:00', '23:59:00', 'active' FROM facility_sports fs WHERE fs.facility_id=28 AND fs.catalog_sport_id=1 ORDER BY fs.id LIMIT 1;
+INSERT INTO facility_courts (facility_id, sport_id, name, price_per_hour, open_time, close_time, status) SELECT 28, fs.id, 'Court B', 350.0, '04:00:00', '23:59:00', 'active' FROM facility_sports fs WHERE fs.facility_id=28 AND fs.catalog_sport_id=1 ORDER BY fs.id LIMIT 1;
+INSERT INTO facility_courts (facility_id, sport_id, name, price_per_hour, open_time, close_time, status) SELECT 20, fs.id, 'BowlingAlley1', 500.0, '15:00:00', '23:00:00', 'active' FROM facility_sports fs WHERE fs.facility_id=20 AND fs.catalog_sport_id=17 ORDER BY fs.id LIMIT 1;
+INSERT INTO facility_courts (facility_id, sport_id, name, price_per_hour, open_time, close_time, status) SELECT 20, fs.id, 'TennisG1', 800.0, '00:05:00', '23:56:00', 'active' FROM facility_sports fs WHERE fs.facility_id=20 AND fs.catalog_sport_id=2 ORDER BY fs.id LIMIT 1;
+INSERT INTO facility_courts (facility_id, sport_id, name, price_per_hour, open_time, close_time, status) SELECT 20, fs.id, 'VolleyGround1', 500.0, '16:00:00', '23:30:00', 'active' FROM facility_sports fs WHERE fs.facility_id=20 AND fs.catalog_sport_id=8 ORDER BY fs.id LIMIT 1;
+
+-- facility_sport_schedules
+INSERT INTO facility_sport_schedules (facility_id, sport_id, court_name, day_type, open_time, close_time, slot_minutes, status) SELECT 20, COALESCE(fs.id,0), 'Bengaluru', 'weekday', '00:00:00'::time, '23:59:00'::time, 30, 'active' FROM (SELECT id FROM facility_sports WHERE facility_id=20 AND catalog_sport_id=1 ORDER BY id LIMIT 1) fs;
+INSERT INTO facility_sport_schedules (facility_id, sport_id, court_name, day_type, open_time, close_time, slot_minutes, status) SELECT 28, COALESCE(fs.id,0), 'Court A', 'all', '04:00:00'::time, '23:59:00'::time, 60, 'active' FROM (SELECT id FROM facility_sports WHERE facility_id=28 AND catalog_sport_id=1 ORDER BY id LIMIT 1) fs;
+INSERT INTO facility_sport_schedules (facility_id, sport_id, court_name, day_type, open_time, close_time, slot_minutes, status) SELECT 28, COALESCE(fs.id,0), 'Court B', 'all', '04:00:00'::time, '23:59:00'::time, 60, 'active' FROM (SELECT id FROM facility_sports WHERE facility_id=28 AND catalog_sport_id=1 ORDER BY id LIMIT 1) fs;
+INSERT INTO facility_sport_schedules (facility_id, sport_id, court_name, day_type, open_time, close_time, slot_minutes, status) SELECT 20, COALESCE(fs.id,0), 'BowlingAlley1', 'weekday', '15:00:00'::time, '23:00:00'::time, 60, 'active' FROM (SELECT id FROM facility_sports WHERE facility_id=20 AND catalog_sport_id=17 ORDER BY id LIMIT 1) fs;
+INSERT INTO facility_sport_schedules (facility_id, sport_id, court_name, day_type, open_time, close_time, slot_minutes, status) SELECT 20, COALESCE(fs.id,0), 'TennisG1', 'all', '00:05:00'::time, '23:56:00'::time, 90, 'active' FROM (SELECT id FROM facility_sports WHERE facility_id=20 AND catalog_sport_id=2 ORDER BY id LIMIT 1) fs;
+INSERT INTO facility_sport_schedules (facility_id, sport_id, court_name, day_type, open_time, close_time, slot_minutes, status) SELECT 20, COALESCE(fs.id,0), 'VolleyGround1', 'all', '16:00:00'::time, '23:30:00'::time, 30, 'active' FROM (SELECT id FROM facility_sports WHERE facility_id=20 AND catalog_sport_id=8 ORDER BY id LIMIT 1) fs;
+
+-- app_facilities
+INSERT INTO app_facilities (id, name, location, city_name, logo_url, latitude, longitude, geohash, geohash5, customer_ok, booking_blocked, maintenance, status) OVERRIDING SYSTEM VALUE VALUES (20, 'strolllabstesting', 'Bangalore', 'Bangalore', 'https://strollbike.com/Services/DnS/facilitiesLogo/28_logo.jpg', 12.9716, 77.5946, 'tdr1v9', 'tdr1v', TRUE, FALSE, FALSE, 'active') ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, location=EXCLUDED.location, city_name=EXCLUDED.city_name, logo_url=EXCLUDED.logo_url, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, geohash=EXCLUDED.geohash, geohash5=EXCLUDED.geohash5, customer_ok=EXCLUDED.customer_ok, status=EXCLUDED.status;
+INSERT INTO app_facilities (id, name, location, city_name, logo_url, latitude, longitude, geohash, geohash5, customer_ok, booking_blocked, maintenance, status) OVERRIDING SYSTEM VALUE VALUES (28, 'Drops N Smashes', 'Drops n smashes256, Velachery Rd, East Tambaram, Tambaram, Chennai, Tamil Nadu 600073', 'Chennai', 'https://strollbike.com/Services/DnS/facilitiesLogo/28_logo.jpg', 12.92325, 80.12959, 'tf2cx2', 'tf2cx', TRUE, FALSE, FALSE, 'active') ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, location=EXCLUDED.location, city_name=EXCLUDED.city_name, logo_url=EXCLUDED.logo_url, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, geohash=EXCLUDED.geohash, geohash5=EXCLUDED.geohash5, customer_ok=EXCLUDED.customer_ok, status=EXCLUDED.status;
+SELECT setval(pg_get_serial_sequence('app_facilities','id'), GREATEST((SELECT MAX(id) FROM app_facilities), 1));
+
+-- app_facility_sports
+INSERT INTO app_facility_sports (facility_id, sport_id) VALUES (20, 1) ON CONFLICT DO NOTHING;
+INSERT INTO app_facility_sports (facility_id, sport_id) VALUES (20, 2) ON CONFLICT DO NOTHING;
+INSERT INTO app_facility_sports (facility_id, sport_id) VALUES (20, 8) ON CONFLICT DO NOTHING;
+INSERT INTO app_facility_sports (facility_id, sport_id) VALUES (20, 17) ON CONFLICT DO NOTHING;
+INSERT INTO app_facility_sports (facility_id, sport_id) VALUES (28, 1) ON CONFLICT DO NOTHING;
+
+-- app_price_list
+DELETE FROM app_price_list WHERE facility_id IN (20,28);
+INSERT INTO app_price_list (facility_id, sport_id, court_name, day_type, price, advance_amount) VALUES (20, 1, 'Bengaluru', 'WEEKDAY', 160.0, 1.0);
+INSERT INTO app_price_list (facility_id, sport_id, court_name, day_type, price, advance_amount) VALUES (28, 1, 'Court A', 'ALLDAYS', 350.0, 100.0);
+INSERT INTO app_price_list (facility_id, sport_id, court_name, day_type, price, advance_amount) VALUES (28, 1, 'Court B', 'ALLDAYS', 350.0, 100.0);
+INSERT INTO app_price_list (facility_id, sport_id, court_name, day_type, price, advance_amount) VALUES (20, 17, 'BowlingAlley1', 'WEEKDAY', 500.0, 100.0);
+INSERT INTO app_price_list (facility_id, sport_id, court_name, day_type, price, advance_amount) VALUES (20, 2, 'TennisG1', 'ALLDAYS', 800.0, 100.0);
+INSERT INTO app_price_list (facility_id, sport_id, court_name, day_type, price, advance_amount) VALUES (20, 8, 'VolleyGround1', 'ALLDAYS', 500.0, 100.0);
+
+-- platform_onboarding_requests (submitted payloads from dump)
+INSERT INTO platform_onboarding_requests (kind, email, whatsapp_number, payload, status) VALUES ('facility', 'rajabharathi453@gmail.com', '+914435646232', '{"facilityId": 20, "facilityName": "strolllabstesting", "location": "Bangalore", "latitude": "12.9716000", "longitude": "77.5946000", "geohash": "tdr1v9", "geohash5": "tdr1v", "googleMapUrl": "https://www.google.com/maps/dir//Drops+n+smashes,+256,+Velachery+Main+Rd,+East+Tambaram,+Tambaram,+Chennai,+Tamil+Nadu+600073/@12.9990656,80.2521088,14z/data=!4m8!4m7!1m0!1m5!1m1!1s0x3a525f553fe2c8b1:0xb4425a158a5695fd!2m2!1d80.1355032!2d12.9224915?entry=ttu&g_ep=EgoyMDI2MDQwNS4wIKXMDSoASAFQAw%3D%3D", "facilityLogoUrl": "https://strollbike.com/Services/DnS/facilitiesLogo/28_logo.jpg", "openingTime": null, "closingTime": null, "hourlyRate": "0.00", "Booking_advance_amount": "100.00", "allow_full_payment": "1", "allow_advance_payment": "1", "allow_spot_payment": "1", "services_enabled": "1", "whatsapp_enabled": "1", "facilityServiceNo": "+91 44 3564 6232", "support_contact": "044 3556 1916", "metaPhoneNumberId": "1195344690327311", "wabaId": "1087061690668415", "visibility": "testing", "sports": [{"sportId": 1, "sportName": "Badminton"}, {"sportId": 2, "sportName": "Tennis"}, {"sportId": 8, "sportName": "Volleyball"}, {"sportId": 17, "sportName": "Bowling"}], "courts": [{"subFacilityId": 17, "sportId": 1, "name": "Bengaluru", "schedules": [{"dayType": "Weekday", "openingTime": "00:00:00", "closingTime": "23:59:00", "price": "160.00", "Min_Duration": "30", "advance_amount": "1.00"}]}, {"subFacilityId": 67, "sportId": 17, "name": "BowlingAlley1", "schedules": [{"dayType": "Weekday", "openingTime": "15:00:00", "closingTime": "23:00:00", "price": "500.00", "Min_Duration": "60", "advance_amount": null}]}, {"subFacilityId": 68, "sportId": 2, "name": "TennisG1", "schedules": [{"dayType": "Alldays", "openingTime": "00:05:00", "closingTime": "23:56:00", "price": "800.00", "Min_Duration": "90", "advance_amount": null}]}, {"subFacilityId": 69, "sportId": 8, "name": "VolleyGround1", "schedules": [{"dayType": "Alldays", "openingTime": "16:00:00", "closingTime": "23:30:00", "price": "500.00", "Min_Duration": "30", "advance_amount": null}]}], "source": "dump.sql"}'::jsonb, 'approved');
+INSERT INTO platform_onboarding_requests (kind, email, whatsapp_number, payload, status) VALUES ('facility', 'rajabharathi453@gmail.com', '+914435561916', '{"facilityId": 28, "facilityName": "Drops N Smashes", "location": "Drops n smashes256, Velachery Rd, East Tambaram, Tambaram, Chennai, Tamil Nadu 600073", "latitude": "12.9232500", "longitude": "80.1295900", "geohash": "tf2cx2", "geohash5": "tf2cx", "googleMapUrl": "https://www.google.com/maps/dir//Drops+n+smashes,+256,+Velachery+Main+Rd,+East+Tambaram,+Tambaram,+Chennai,+Tamil+Nadu+600073/@12.9990656,80.2521088,14z/data=!4m8!4m7!1m0!1m5!1m1!1s0x3a525f553fe2c8b1:0xb4425a158a5695fd!2m2!1d80.1355032!2d12.9224915?entry=ttu&g_ep=EgoyMDI2MDQwNS4wIKXMDSoASAFQAw%3D%3D", "facilityLogoUrl": "https://strollbike.com/Services/DnS/facilitiesLogo/28_logo.jpg", "openingTime": null, "closingTime": null, "hourlyRate": "0.00", "Booking_advance_amount": "50.00", "allow_full_payment": "1", "allow_advance_payment": "1", "allow_spot_payment": "1", "services_enabled": "1", "whatsapp_enabled": "1", "facilityServiceNo": "+91 44 3556 1916", "support_contact": "044 3556 1916", "metaPhoneNumberId": "1317032261496899", "wabaId": "1422938799723213", "visibility": "live", "sports": [{"sportId": 1, "sportName": "Badminton"}], "courts": [{"subFacilityId": 33, "sportId": 1, "name": "Court A", "schedules": [{"dayType": "Alldays", "openingTime": "04:00:00", "closingTime": "23:59:00", "price": "350.00", "Min_Duration": "60", "advance_amount": "100.00"}]}, {"subFacilityId": 34, "sportId": 1, "name": "Court B", "schedules": [{"dayType": "Alldays", "openingTime": "04:00:00", "closingTime": "23:59:00", "price": "350.00", "Min_Duration": "60", "advance_amount": "100.00"}]}], "source": "dump.sql"}'::jsonb, 'approved');
+COMMIT;
+
+SELECT 'facilities' t, count(*)::text n FROM facilities WHERE id IN (20,28)
+UNION ALL SELECT 'app_facilities', count(*)::text FROM app_facilities WHERE id IN (20,28)
+UNION ALL SELECT 'facility_sports', count(*)::text FROM facility_sports WHERE facility_id IN (20,28)
+UNION ALL SELECT 'facility_courts', count(*)::text FROM facility_courts WHERE facility_id IN (20,28)
+UNION ALL SELECT 'facility_sport_schedules', count(*)::text FROM facility_sport_schedules WHERE facility_id IN (20,28)
+UNION ALL SELECT 'app_facility_sports', count(*)::text FROM app_facility_sports WHERE facility_id IN (20,28)
+UNION ALL SELECT 'app_price_list', count(*)::text FROM app_price_list WHERE facility_id IN (20,28)
+UNION ALL SELECT 'whatsapp', count(*)::text FROM facility_whatsapp_config WHERE facility_id IN (20,28)
+UNION ALL SELECT 'payments', count(*)::text FROM facility_sport_payments WHERE facility_id IN (20,28)
+UNION ALL SELECT 'flags', count(*)::text FROM facility_service_flags WHERE facility_id IN (20,28)
+UNION ALL SELECT 'onboarding', count(*)::text FROM platform_onboarding_requests WHERE kind='facility';
+

@@ -85,7 +85,15 @@ RETURNING id`,
 	if err != nil {
 		return nil, err
 	}
-	return s.getEntry(ctx, id)
+	entry, err := s.getEntry(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	// Paid/spot on create → confirmation WA (PHP webhook / spot path).
+	if isPaidTournamentStatus(pay) {
+		s.notifyTournamentRegistrationConfirmation(ctx, entry, 0, "")
+	}
+	return entry, nil
 }
 
 func (s *Service) GetEntry(ctx context.Context, id int64) (*Entry, error) {
@@ -112,6 +120,7 @@ func (s *Service) UpdateEntryPayment(ctx context.Context, entryID int64, payment
 	if entryID <= 0 || pay == "" {
 		return nil, fmt.Errorf("invalid_payment_status")
 	}
+	prev, _ := s.getEntry(ctx, entryID)
 	res, err := s.DB.ExecContext(ctx, `
 UPDATE tournament_entries SET payment_status=$1 WHERE id=$2`, pay, entryID)
 	if err != nil {
@@ -121,7 +130,24 @@ UPDATE tournament_entries SET payment_status=$1 WHERE id=$2`, pay, entryID)
 	if n == 0 {
 		return nil, fmt.Errorf("not_found")
 	}
-	return s.getEntry(ctx, entryID)
+	entry, err := s.getEntry(ctx, entryID)
+	if err != nil {
+		return nil, err
+	}
+	wasPaid := prev != nil && isPaidTournamentStatus(prev.PaymentStatus)
+	if isPaidTournamentStatus(pay) && !wasPaid {
+		s.notifyTournamentRegistrationConfirmation(ctx, entry, 0, pay)
+	}
+	return entry, nil
+}
+
+func isPaidTournamentStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "paid", "completed", "success", "spot":
+		return true
+	default:
+		return false
+	}
 }
 
 // --- Fixtures ---

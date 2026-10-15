@@ -1,0 +1,288 @@
+{
+  "service": "Identity",
+  "base_url": "http://localhost:8080",
+  "tested_at": "2026-10-14T06:21:06.065255+00:00",
+  "summary": {
+    "total": 26,
+    "passed": 26,
+    "failed": 0
+  },
+  "results": [
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/v1/auth/health",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "status=ok postgres=True",
+      "body_preview": "{\"google_oauth\":true,\"postgres\":true,\"runtime\":\"go\",\"service\":\"identity\",\"status\":\"ok\"}\n"
+    },
+    {
+      "name": "openapi",
+      "method": "GET",
+      "path": "/v1/auth/openapi.json",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "paths=17",
+      "body_preview": "{\n  \"openapi\": \"3.0.3\",\n  \"info\": {\n    \"title\": \"Facinect Identity API\",\n    \"description\": \"Auth, session, and partner membership APIs (local gateway).\",\n    \"version\": \"1.0.0\"\n  },\n  \"servers\": [\n    {\n      \"url\": \"http://localhost:8080\",\n      \"description\": \"Local Traefik gateway\"\n    },\n    {"
+    },
+    {
+      "name": "jwks",
+      "method": "GET",
+      "path": "/v1/auth/jwks.json",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "keys=1",
+      "body_preview": "{\"keys\":[{\"alg\":\"RS256\",\"e\":\"AQAB\",\"kid\":\"facinect-1\",\"kty\":\"RSA\",\"n\":\"wfcsnGYgkvpng0pCMdX13LaWgbted8MNOwu8eByX7PD8XjGW2dxiZ6moXOTfcfHbPe1issffS8AvYAoKsfhJzjB5yLHhrSZ5Xjh6yU4WV4a1BiIh3-58O09VUsFBP86W9ClxKInY97LQEofBfMMOsqM1NsMrlheSkDc69D5LRK1_jpkvl3nPApcHjMgTY7h_1iPZZw2giU_pAQ7RYOXIFpMYLmbcq0xcUOyWf"
+    },
+    {
+      "name": "check-email invalid",
+      "method": "POST",
+      "path": "/v1/auth/check-email",
+      "expected": 400,
+      "status": 400,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"invalid_email\"}\n"
+    },
+    {
+      "name": "check-email unknown",
+      "method": "POST",
+      "path": "/v1/auth/check-email",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "exists=False",
+      "body_preview": "{\"can_password\":false,\"exists\":false}\n"
+    },
+    {
+      "name": "check-email admin",
+      "method": "POST",
+      "path": "/v1/auth/check-email",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "exists=True",
+      "body_preview": "{\"can_password\":true,\"exists\":true}\n"
+    },
+    {
+      "name": "login bad password",
+      "method": "POST",
+      "path": "/v1/auth/login",
+      "expected": 401,
+      "status": 401,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"invalid_credentials\"}\n"
+    },
+    {
+      "name": "login admin",
+      "method": "POST",
+      "path": "/v1/auth/login",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "has_access=True has_refresh=True",
+      "body_preview": "{\"token_type\":\"Bearer\",\"access_token\":\"eyJhbGciOiJSUzI1NiIsImtpZCI6ImZhY2luZWN0LTEiLCJ0eXAiOiJKV1QifQ.eyJhdWQiOiJmYWNpbmVjdC1hcHBzIiwiZW1haWwiOiJhZG1pbkBmYWNpbmVjdC5sb2NhbCIsImV4cCI6MTc5MTk1OTc2MiwiZmFjaWxpdGllcyI6WzI5XSwiaWF0IjoxNzkxOTU4ODYyLCJpc3MiOiJodHRwczovL2FwaS5mYWNpbmVjdC5sb2NhbCIsIm5hbWUiOi"
+    },
+    {
+      "name": "me unauthorized",
+      "method": "GET",
+      "path": "/v1/auth/me",
+      "expected": 401,
+      "status": 401,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"missing_bearer\"}\n"
+    },
+    {
+      "name": "me authenticated",
+      "method": "GET",
+      "path": "/v1/auth/me",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "user=admin@facinect.local facilities=0",
+      "body_preview": "{\"claims\":{\"aud\":\"facinect-apps\",\"exp\":1791959762,\"facilities\":[29],\"iss\":\"https://api.facinect.local\",\"role\":\"admin\",\"sub\":\"20\"},\"redirect\":\"/facility/demo-arena\",\"user\":{\"avatar_url\":null,\"current_facility_id\":29,\"email\":\"admin@facinect.local\",\"facilities\":[{\"facilityId\":29,\"facilityName\":\"Demo Ar"
+    },
+    {
+      "name": "session GET",
+      "method": "GET",
+      "path": "/v1/auth/session",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "keys=['ok', 'redirect', 'user']",
+      "body_preview": "{\"ok\":true,\"redirect\":\"/facility/demo-arena\",\"user\":{\"avatar_url\":null,\"current_facility_id\":29,\"email\":\"admin@facinect.local\",\"facilities\":[{\"facilityId\":29,\"facilityName\":\"Demo Arena\",\"page_access\":[\"dashboard\",\"bookings\",\"view_bookings\",\"students\",\"members\",\"payments\",\"tournaments\",\"enquiry\",\"off"
+    },
+    {
+      "name": "session refresh",
+      "method": "POST",
+      "path": "/v1/auth/session/refresh",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"ok\":true,\"redirect\":\"/facility/demo-arena\",\"user\":{\"avatar_url\":null,\"current_facility_id\":29,\"email\":\"admin@facinect.local\",\"facilities\":[{\"facilityId\":29,\"facilityName\":\"Demo Arena\",\"page_access\":[\"dashboard\",\"bookings\",\"view_bookings\",\"students\",\"members\",\"payments\",\"tournaments\",\"enquiry\",\"off"
+    },
+    {
+      "name": "token refresh",
+      "method": "POST",
+      "path": "/v1/auth/token/refresh",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "rotated=True",
+      "body_preview": "{\"token_type\":\"Bearer\",\"access_token\":\"eyJhbGciOiJSUzI1NiIsImtpZCI6ImZhY2luZWN0LTEiLCJ0eXAiOiJKV1QifQ.eyJhdWQiOiJmYWNpbmVjdC1hcHBzIiwiZW1haWwiOiJhZG1pbkBmYWNpbmVjdC5sb2NhbCIsImV4cCI6MTc5MTk1OTc2MiwiZmFjaWxpdGllcyI6WzI5XSwiaWF0IjoxNzkxOTU4ODYyLCJpc3MiOiJodHRwczovL2FwaS5mYWNpbmVjdC5sb2NhbCIsIm5hbWUiOi"
+    },
+    {
+      "name": "token refresh invalid",
+      "method": "POST",
+      "path": "/v1/auth/token/refresh",
+      "expected": 401,
+      "status": 401,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"invalid_refresh\"}\n"
+    },
+    {
+      "name": "password unauthorized",
+      "method": "POST",
+      "path": "/v1/auth/password",
+      "expected": 401,
+      "status": 401,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"missing_bearer\"}\n"
+    },
+    {
+      "name": "password wrong current",
+      "method": "POST",
+      "path": "/v1/auth/password",
+      "expected": [
+        400,
+        401
+      ],
+      "status": 400,
+      "pass": true,
+      "notes": "expects rejection; admin password not changed",
+      "body_preview": "{\"error\":\"invalid_current_password\"}\n"
+    },
+    {
+      "name": "otp request",
+      "method": "POST",
+      "path": "/v1/auth/otp/request",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "dev_otp=no keys=['delivery', 'expires_in', 'ok', 'phone']",
+      "body_preview": "{\"delivery\":\"whatsapp\",\"expires_in\":300,\"ok\":true,\"phone\":\"919999000001\"}\n"
+    },
+    {
+      "name": "otp verify (no dev_otp; expect fail)",
+      "method": "POST",
+      "path": "/v1/auth/otp/verify",
+      "expected": [
+        401,
+        400
+      ],
+      "status": 401,
+      "pass": true,
+      "notes": "dev_otp not returned \u2014 cannot complete happy path",
+      "body_preview": "{\"error\":\"otp_invalid\"}\n"
+    },
+    {
+      "name": "otp verify wrong code",
+      "method": "POST",
+      "path": "/v1/auth/otp/verify",
+      "expected": [
+        401,
+        400
+      ],
+      "status": 401,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"otp_invalid\"}\n"
+    },
+    {
+      "name": "google id_token missing",
+      "method": "POST",
+      "path": "/v1/auth/google",
+      "expected": 400,
+      "status": 400,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"id_token_required\"}\n"
+    },
+    {
+      "name": "google id_token invalid",
+      "method": "POST",
+      "path": "/v1/auth/google",
+      "expected": 401,
+      "status": 401,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"id_token_invalid\"}\n"
+    },
+    {
+      "name": "google start",
+      "method": "GET",
+      "path": "/v1/auth/google/start",
+      "expected": [
+        302,
+        303
+      ],
+      "status": 302,
+      "pass": true,
+      "notes": "location=https://accounts.google.com/o/oauth2/v2/auth?access_type=online&client_id=1076951451971-vs0fdsrev932il202d88l6pf5qidc4nf",
+      "body_preview": "<a href=\"https://accounts.google.com/o/oauth2/v2/auth?access_type=online&amp;client_id=1076951451971-vs0fdsrev932il202d88l6pf5qidc4nf.apps.googleusercontent.com&amp;code_challenge=dp8pvtSJVCGT1df9py1CIp0Ca_tx5m4-h8LRLBQOSaQ&amp;code_challenge_method=S256&amp;prompt=select_account&amp;redirect_uri=ht"
+    },
+    {
+      "name": "google callback no params",
+      "method": "GET",
+      "path": "/v1/auth/google/callback",
+      "expected": [
+        302,
+        400,
+        401
+      ],
+      "status": 302,
+      "pass": true,
+      "notes": "location=/login?error=invalid_state",
+      "body_preview": "<a href=\"/login?error=invalid_state\">Found</a>.\n\n"
+    },
+    {
+      "name": "google handoff invalid",
+      "method": "POST",
+      "path": "/v1/auth/google/handoff",
+      "expected": 401,
+      "status": 401,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"error\":\"invalid_handoff\"}\n"
+    },
+    {
+      "name": "logout",
+      "method": "POST",
+      "path": "/v1/auth/logout",
+      "expected": 200,
+      "status": 200,
+      "pass": true,
+      "notes": "",
+      "body_preview": "{\"ok\":true}\n"
+    },
+    {
+      "name": "refresh after logout",
+      "method": "POST",
+      "path": "/v1/auth/token/refresh",
+      "expected": 401,
+      "status": 401,
+      "pass": true,
+      "notes": "revoked refresh should fail",
+      "body_preview": "{\"error\":\"invalid_refresh\"}\n"
+    }
+  ]
+}

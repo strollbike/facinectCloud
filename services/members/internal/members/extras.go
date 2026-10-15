@@ -193,18 +193,38 @@ FROM member_plans WHERE id=$1 AND facility_id=$2`, planID, facilityID).
 	return &p, nil
 }
 
-func (s *Service) DeletePlan(ctx context.Context, facilityID, planID int64) error {
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE member_plans SET status='inactive', updated_at=NOW()
-WHERE id=$1 AND facility_id=$2`, planID, facilityID)
+// DeletePlan hard-removes the plan (and settings). Returns plan name so callers
+// can free matching Membership booking blocks / slots.
+func (s *Service) DeletePlan(ctx context.Context, facilityID, planID int64) (string, error) {
+	var name string
+	err := s.DB.QueryRowContext(ctx, `
+SELECT name FROM member_plans WHERE id=$1 AND facility_id=$2`, planID, facilityID).Scan(&name)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("not_found")
+	}
 	if err != nil {
-		return err
+		return "", err
+	}
+
+	_, _ = s.DB.ExecContext(ctx, `
+DELETE FROM member_plan_settings WHERE plan_id=$1 AND facility_id=$2`, planID, facilityID)
+
+	// Detach enrollments that reference this plan (keep member history rows).
+	_, _ = s.DB.ExecContext(ctx, `
+UPDATE memberships SET status='inactive', plan_id=NULL, updated_at=NOW()
+WHERE facility_id=$1 AND (plan_id=$2 OR LOWER(TRIM(COALESCE(plan_name,''))) = LOWER(TRIM($3)))`,
+		facilityID, planID, name)
+
+	res, err := s.DB.ExecContext(ctx, `
+DELETE FROM member_plans WHERE id=$1 AND facility_id=$2`, planID, facilityID)
+	if err != nil {
+		return name, err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("not_found")
+		return name, fmt.Errorf("not_found")
 	}
-	return nil
+	return name, nil
 }
 
 func (s *Service) GetPlanSettings(ctx context.Context, facilityID, planID int64) (*PlanSettings, error) {
@@ -579,21 +599,25 @@ func digitsOnlyPhone(raw string) string {
 }
 
 func (s *Service) notifyWhatsApp(ctx context.Context, facilityID int64, phone, template, body string) error {
+	return s.notifyWhatsAppData(ctx, facilityID, phone, template, map[string]interface{}{
+		"body": body, "message": body, "text": body,
+	})
+}
+
+func (s *Service) notifyWhatsAppData(ctx context.Context, facilityID int64, phone, template string, data map[string]interface{}) error {
 	base := strings.TrimRight(strings.TrimSpace(s.Cfg.NotificationsURL), "/")
 	if base == "" {
 		return fmt.Errorf("notifications_url_missing")
 	}
-	fid := facilityID
+	if data == nil {
+		data = map[string]interface{}{}
+	}
 	payload := map[string]interface{}{
 		"channel":     "whatsapp",
-		"facility_id": fid,
+		"facility_id": facilityID,
 		"template":    template,
 		"to":          map[string]string{"whatsapp": phone},
-		"data": map[string]interface{}{
-			"body":    body,
-			"message": body,
-			"text":    body,
-		},
+		"data":        data,
 	}
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/notifications/send", bytes.NewReader(raw))
@@ -614,6 +638,49 @@ func (s *Service) notifyWhatsApp(ctx context.Context, facilityID int64, phone, t
 		return fmt.Errorf("notify_http_%d: %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+// notifyMemberRegistrationConfirmation mirrors PHP member_edit.php (6 body params).
+func (s *Service) notifyMemberRegistrationConfirmation(ctx context.Context, row *MemberRow) {
+	if row == nil {
+		return
+	}
+	phone := digitsOnlyPhone(row.WhatsApp)
+	if phone == "" {
+		phone = digitsOnlyPhone(row.Phone)
+	}
+	if phone == "" {
+		return
+	}
+	facilityName := ""
+	_ = s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(name,'') FROM app_facilities WHERE id=$1`, row.FacilityID).Scan(&facilityName)
+	if facilityName == "" {
+		_ = s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(name,'') FROM facilities WHERE id=$1`, row.FacilityID).Scan(&facilityName)
+	}
+	if facilityName == "" {
+		facilityName = "Academy"
+	}
+	plan := strings.TrimSpace(row.PlanName)
+	if plan == "" {
+		plan = "Membership"
+	}
+	roleName := "Member"
+	benefit := "You now have access to member features and account management services including exclusive member offers and advanced access features. To access your Member Portal, simply send \"Hi\" and select the option, then choose \"Member Portal\"."
+	if row.PrimaryMember {
+		roleName = "Primary Member"
+		benefit = "As a Primary Member, you now have access to premium privileges including exclusive member offers, advanced access features, the ability to add additional members under this plan, and submit member removal requests when needed. To access your Member Portal, simply send \"Hi\" and select the Options, then choose \"Member Portal\"."
+	}
+	displayPhone := phone
+	if len(displayPhone) > 10 {
+		displayPhone = displayPhone[len(displayPhone)-10:]
+	}
+	_ = s.notifyWhatsAppData(ctx, row.FacilityID, phone, "member_registration_confirmation", map[string]interface{}{
+		"body_params": []string{
+			row.FullName, plan, roleName, benefit, facilityName, displayPhone,
+		},
+	})
 }
 
 func (s *Service) ListOpenSlots(ctx context.Context, facilityID int64) ([]OpenSlot, error) {

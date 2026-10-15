@@ -509,11 +509,28 @@ func (s *Service) NotifyContacts(ctx context.Context, tournamentID, facilityID i
 	if msg == "" {
 		msg = "Tournament update from Facinect."
 	}
-	if strings.TrimSpace(template) == "" {
-		template = "tournament_notify"
+	tmpl := strings.TrimSpace(template)
+	if tmpl == "" {
+		tmpl = "tournament_registration_link" // PHP catalog default for share/notify
+	}
+	tour, _ := s.Get(ctx, tournamentID)
+	tourName := "Tournament"
+	tourDate := ""
+	buttonToken := fmt.Sprintf("%d", tournamentID)
+	if tour != nil {
+		if strings.TrimSpace(tour.Name) != "" {
+			tourName = tour.Name
+		}
+		tourDate = strings.TrimSpace(tour.StartDate)
+		if tourDate == "" {
+			tourDate = "TBA"
+		}
+		if slug := strings.TrimSpace(tour.Slug); slug != "" {
+			buttonToken = slug
+		}
 	}
 	rows, err := s.DB.QueryContext(ctx, `
-SELECT DISTINCT COALESCE(NULLIF(phone,''), '')
+SELECT DISTINCT COALESCE(NULLIF(phone,''), ''), COALESCE(NULLIF(player_name,''), 'Player')
 FROM tournament_entries WHERE tournament_id=$1 AND COALESCE(phone,'') <> ''`, tournamentID)
 	if err != nil {
 		return 0, err
@@ -521,15 +538,39 @@ FROM tournament_entries WHERE tournament_id=$1 AND COALESCE(phone,'') <> ''`, to
 	defer rows.Close()
 	sent := 0
 	for rows.Next() {
-		var phone string
-		if err := rows.Scan(&phone); err != nil {
+		var phone, player string
+		if err := rows.Scan(&phone, &player); err != nil {
 			continue
 		}
 		phone = digitsOnlyTourPhone(phone)
 		if phone == "" {
 			continue
 		}
-		if err := s.notifyWhatsApp(ctx, facilityID, phone, template, msg); err == nil {
+		if player == "" {
+			player = "Player"
+		}
+		var data map[string]interface{}
+		switch tmpl {
+		case "tournament_registration_link":
+			data = map[string]interface{}{
+				"body_params":       []string{player, tourName, tourDate},
+				"button_url_param":  buttonToken,
+				"title":             "Tournament registration",
+				"body":              msg,
+			}
+		case "hello_world1":
+			data = map[string]interface{}{
+				"header_image":         "https://strollbike.com/Services/Facinect/images/poster.jpeg",
+				"quick_reply_payload":  "I_AM_INTERESTED",
+				"title":                "Facinect",
+				"body":                 msg,
+			}
+		default:
+			data = map[string]interface{}{
+				"title": "Tournament update", "body": msg, "message": msg, "text": msg, "type": "tournament",
+			}
+		}
+		if err := s.notifyWhatsAppData(ctx, facilityID, phone, tmpl, data); err == nil {
 			sent++
 		}
 	}
@@ -551,22 +592,25 @@ func digitsOnlyTourPhone(raw string) string {
 }
 
 func (s *Service) notifyWhatsApp(ctx context.Context, facilityID int64, phone, template, body string) error {
+	return s.notifyWhatsAppData(ctx, facilityID, phone, template, map[string]interface{}{
+		"title": "Tournament update", "body": body, "message": body, "text": body, "type": "tournament",
+	})
+}
+
+func (s *Service) notifyWhatsAppData(ctx context.Context, facilityID int64, phone, template string, data map[string]interface{}) error {
 	base := strings.TrimRight(strings.TrimSpace(s.Cfg.NotificationsURL), "/")
 	if base == "" {
 		return fmt.Errorf("notifications_url_missing")
 	}
+	if data == nil {
+		data = map[string]interface{}{}
+	}
 	payload := map[string]interface{}{
-		"channel":     "both",
+		"channel":     "whatsapp",
 		"facility_id": facilityID,
 		"template":    template,
 		"to":          map[string]string{"whatsapp": phone},
-		"data": map[string]interface{}{
-			"title":   "Tournament update",
-			"body":    body,
-			"message": body,
-			"text":    body,
-			"type":    "tournament",
-		},
+		"data":        data,
 	}
 	raw, _ := json.Marshal(payload)
 	client := &http.Client{Timeout: 20 * time.Second}
@@ -588,6 +632,40 @@ func (s *Service) notifyWhatsApp(ctx context.Context, facilityID int64, phone, t
 		return fmt.Errorf("notify_http_%d: %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+// notifyTournamentRegistrationConfirmation mirrors PHP facinect_send_tournament_registration_whatsapp.
+func (s *Service) notifyTournamentRegistrationConfirmation(ctx context.Context, entry *Entry, amount float64, txn string) {
+	if entry == nil {
+		return
+	}
+	phone := digitsOnlyTourPhone(entry.Phone)
+	if phone == "" {
+		return
+	}
+	tour, err := s.Get(ctx, entry.TournamentID)
+	if err != nil || tour == nil {
+		return
+	}
+	tourName := strings.TrimSpace(tour.Name)
+	if tourName == "" {
+		tourName = "Tournament"
+	}
+	cat := strings.TrimSpace(entry.Category)
+	if cat == "" {
+		cat = "Open"
+	}
+	regCode := fmt.Sprintf("REG-%d", entry.ID)
+	if txn == "" {
+		txn = "SPOT_" + regCode
+	}
+	amt := fmt.Sprintf("%.2f", amount)
+	_ = s.notifyWhatsAppData(ctx, tour.FacilityID, phone, "tournament_registration_confirmation", map[string]interface{}{
+		"body_params": []string{
+			tourName, cat, regCode, amt, txn,
+		},
+		"button_url_param": "code=" + regCode,
+	})
 }
 
 func (s *Service) MarkAllPaid(ctx context.Context, tournamentID int64, category string) (int64, error) {

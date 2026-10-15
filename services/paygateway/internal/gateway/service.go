@@ -67,6 +67,54 @@ RETURNING id`,
 	return res, nil
 }
 
+func (s *Service) CreatePaymentLink(ctx context.Context, req PaymentLinkRequest) (*PaymentLinkResult, error) {
+	p, err := s.Registry.Get(req.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if !p.Configured() {
+		p, err = s.Registry.Default()
+		if err != nil {
+			return nil, fmt.Errorf("provider_unavailable")
+		}
+	}
+	paise := req.AmountPaise
+	if paise <= 0 && req.Amount > 0 {
+		paise = int64(req.Amount*100 + 0.5)
+	}
+	req.AmountPaise = paise
+	if req.AmountPaise <= 0 {
+		return nil, fmt.Errorf("invalid_amount")
+	}
+	if strings.TrimSpace(req.Currency) == "" {
+		req.Currency = "INR"
+	}
+	return p.CreatePaymentLink(ctx, req)
+}
+
+func (s *Service) CancelPaymentLink(ctx context.Context, linkID string) error {
+	linkID = strings.TrimSpace(linkID)
+	if linkID == "" {
+		return fmt.Errorf("invalid_link_id")
+	}
+	p, err := s.Registry.Default()
+	if err != nil {
+		return err
+	}
+	// Prefer razorpay when link looks like plink_* and provider is configured.
+	if strings.HasPrefix(linkID, "plink_") {
+		if rp, e := s.Registry.Get("razorpay"); e == nil && rp.Configured() {
+			p = rp
+		}
+	}
+	if strings.HasPrefix(linkID, "plink_stub_") {
+		if sp, e := s.Registry.Get("stub"); e == nil {
+			p = sp
+		}
+	}
+	return p.CancelPaymentLink(ctx, linkID)
+}
+
 func (s *Service) Verify(ctx context.Context, req VerifyRequest) (*VerifyResult, error) {
 	p, err := s.Registry.Get(req.Provider)
 	if err != nil {

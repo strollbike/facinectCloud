@@ -123,6 +123,21 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// Surface provider failures so clients can fall back (e.g. template → text).
+	if job != nil && strings.EqualFold(job.Status, "failed") {
+		errMsg := strings.TrimSpace(job.ErrorText)
+		if errMsg == "" {
+			errMsg = "send_failed"
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+			"error":      errMsg,
+			"error_text": job.ErrorText,
+			"status":     job.Status,
+			"id":         job.ID,
+			"job":        job,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, job)
 }
 
@@ -174,14 +189,30 @@ func (s *Server) handleSendBulk(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "recipients_limit_200"})
 		return
 	}
+	tmpl := strings.TrimSpace(body.TemplateKey)
+	if tmpl == "" {
+		tmpl = "hello_world1"
+	}
+	data := body.Data
+	if data == nil {
+		data = map[string]interface{}{}
+	}
+	if tmpl == "hello_world1" {
+		if _, ok := data["header_image"]; !ok {
+			data["header_image"] = "https://strollbike.com/Services/Facinect/images/poster.jpeg"
+		}
+		if _, ok := data["quick_reply_payload"]; !ok {
+			data["quick_reply_payload"] = "I_AM_INTERESTED"
+		}
+	}
 	jobs := make([]*notify.Job, 0, len(body.Recipients))
 	for _, to := range body.Recipients {
 		job, err := s.Notify.Send(r.Context(), notify.SendRequest{
 			Channel:     body.Channel,
 			FacilityID:  body.FacilityID,
-			TemplateKey: body.TemplateKey,
+			TemplateKey: tmpl,
 			To:          to,
-			Data:        body.Data,
+			Data:        data,
 		})
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{

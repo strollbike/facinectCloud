@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -52,7 +53,7 @@ CREATE TABLE IF NOT EXISTS booking_slots (
   start_time    TIME NOT NULL,
   end_time      TIME NOT NULL,
   status        VARCHAR(16) NOT NULL DEFAULT 'available'
-                CHECK (status IN ('available','booked','blocked')),
+                CHECK (status IN ('available','booked','blocked','held')),
   notes         TEXT NULL,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -60,6 +61,36 @@ CREATE TABLE IF NOT EXISTS booking_slots (
 );
 CREATE INDEX IF NOT EXISTS idx_booking_slots_facility_date
   ON booking_slots(facility_id, slot_date, status);
+
+CREATE TABLE IF NOT EXISTS booking_payment_holds (
+  id                BIGSERIAL PRIMARY KEY,
+  facility_id       BIGINT NOT NULL,
+  public_token      VARCHAR(64) NOT NULL UNIQUE,
+  whatsapp          VARCHAR(32) NOT NULL,
+  customer_name     VARCHAR(191) NULL,
+  category          VARCHAR(64) NULL,
+  sport_name        VARCHAR(128) NULL,
+  logo_url          TEXT NULL,
+  slot_ids          BIGINT[] NOT NULL,
+  slots_summary     TEXT NULL,
+  full_amount       NUMERIC(12,2) NOT NULL DEFAULT 0,
+  pay_amount        NUMERIC(12,2) NOT NULL DEFAULT 0,
+  amount_type       VARCHAR(16) NOT NULL DEFAULT 'advance'
+                    CHECK (amount_type IN ('advance','full')),
+  payment_url       TEXT NULL,
+  provider_link_id  VARCHAR(128) NULL,
+  status            VARCHAR(16) NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','paid','expired','cancelled')),
+  expires_at        TIMESTAMPTZ NOT NULL,
+  paid_at           TIMESTAMPTZ NULL,
+  created_by        VARCHAR(128) NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_booking_payment_holds_facility
+  ON booking_payment_holds(facility_id, status);
+CREATE INDEX IF NOT EXISTS idx_booking_payment_holds_expires
+  ON booking_payment_holds(expires_at) WHERE status='pending';
 
 CREATE TABLE IF NOT EXISTS booking_bookings (
   id               BIGSERIAL PRIMARY KEY,
@@ -120,6 +151,50 @@ CREATE TABLE IF NOT EXISTS booking_blocks (
 );
 CREATE INDEX IF NOT EXISTS idx_booking_blocks_facility_date
   ON booking_blocks(facility_id, block_date);
+
+-- Permanent weekly rules (1=Mon … 7=Sun). Re-applied whenever slots are generated.
+CREATE TABLE IF NOT EXISTS booking_recurring_blocks (
+  id              BIGSERIAL PRIMARY KEY,
+  facility_id     BIGINT NOT NULL,
+  court_id        BIGINT NULL REFERENCES booking_courts(id) ON DELETE SET NULL,
+  weekdays        INT[] NOT NULL,
+  start_time      TIME NOT NULL,
+  end_time        TIME NOT NULL,
+  reason          TEXT NULL,
+  active          BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_booking_recurring_blocks_facility
+  ON booking_recurring_blocks(facility_id) WHERE active;
+
+-- Last manual Generate hours (used by monthly cron / fill — not default 6–22).
+CREATE TABLE IF NOT EXISTS booking_facility_schedule (
+  facility_id     BIGINT PRIMARY KEY,
+  open_hour       INT NOT NULL DEFAULT 6,
+  close_hour      INT NOT NULL DEFAULT 22,
+  slot_minutes    INT NOT NULL DEFAULT 60,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// Widen slot status to include payment-hold "held" (idempotent).
+	_, _ = db.Exec(`
+ALTER TABLE booking_slots DROP CONSTRAINT IF EXISTS booking_slots_status_check`)
+	_, err = db.Exec(`
+ALTER TABLE booking_slots
+  ADD CONSTRAINT booking_slots_status_check
+  CHECK (status IN ('available','booked','blocked','held'))`)
+	// Constraint may already exist with same definition — ignore duplicate.
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		// try recreate only if missing
+		var one int
+		qerr := db.QueryRow(`
+SELECT 1 FROM pg_constraint WHERE conname='booking_slots_status_check'`).Scan(&one)
+		if qerr != nil {
+			return err
+		}
+	}
+	return nil
 }

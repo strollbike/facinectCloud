@@ -39,7 +39,7 @@ func (w *WhatsAppClient) Send(ctx context.Context, req SendRequest, creds WhatsA
 	}
 	tmpl := strings.TrimSpace(req.TemplateKey)
 	if tmpl == "" {
-		tmpl = "hello_world"
+		tmpl = "hello_world1" // Facinect PHP marketing / default template
 	}
 	lang := "en"
 	if req.Data != nil {
@@ -61,28 +61,43 @@ func (w *WhatsAppClient) Send(ctx context.Context, req SendRequest, creds WhatsA
 		return fmt.Sprintf("dry_run:whatsapp:%s:%s:phone=%s", to, tmpl, phoneID), nil
 	}
 
-	template := map[string]interface{}{
-		"name": tmpl,
-		"language": map[string]string{
-			"code": lang,
-		},
-	}
-	if comps := buildTemplateComponents(req); len(comps) > 0 {
-		template["components"] = comps
-	}
-
-	body := map[string]interface{}{
-		"messaging_product": "whatsapp",
-		"to":                to,
-		"type":              "template",
-		"template":          template,
-	}
-	raw, _ := json.Marshal(body)
 	url := fmt.Sprintf(
 		"https://graph.facebook.com/%s/%s/messages",
 		w.Cfg.MetaAPIVersion,
 		phoneID,
 	)
+
+	// Session / free-form text (PHP sendWhatsappMessage cancel notice).
+	sendAsText := strings.EqualFold(tmpl, "text") ||
+		strings.EqualFold(tmpl, "_text") ||
+		strings.EqualFold(dataString(req.Data, "message_type", "send_as"), "text")
+	textBody := dataString(req.Data, "message", "text", "body")
+	var body map[string]interface{}
+	if sendAsText && textBody != "" {
+		body = map[string]interface{}{
+			"messaging_product": "whatsapp",
+			"to":                to,
+			"type":              "text",
+			"text":              map[string]interface{}{"body": textBody},
+		}
+	} else {
+		template := map[string]interface{}{
+			"name": tmpl,
+			"language": map[string]string{
+				"code": lang,
+			},
+		}
+		if comps := buildTemplateComponents(req); len(comps) > 0 {
+			template["components"] = comps
+		}
+		body = map[string]interface{}{
+			"messaging_product": "whatsapp",
+			"to":                to,
+			"type":              "template",
+			"template":          template,
+		}
+	}
+	raw, _ := json.Marshal(body)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
 		return "", err
@@ -126,10 +141,11 @@ func dataString(data map[string]interface{}, keys ...string) string {
 	return ""
 }
 
-// buildTemplateComponents mirrors Facinect PHP OTP + generic body-param templates.
+// buildTemplateComponents mirrors Facinect PHP OTP + body/button/header templates.
 func buildTemplateComponents(req SendRequest) []interface{} {
 	otp := dataString(req.Data, "otp", "code", "otp_code")
-	if otp != "" {
+	// OTP-only path when no explicit body_params (keep facinect_otp shape).
+	if otp != "" && req.Data["body_params"] == nil {
 		return []interface{}{
 			map[string]interface{}{
 				"type": "body",
@@ -146,6 +162,18 @@ func buildTemplateComponents(req SendRequest) []interface{} {
 				},
 			},
 		}
+	}
+
+	var comps []interface{}
+
+	// Header image (hello_world1 marketing).
+	if img := dataString(req.Data, "header_image", "header_image_link", "image_link"); img != "" {
+		comps = append(comps, map[string]interface{}{
+			"type": "header",
+			"parameters": []map[string]interface{}{
+				{"type": "image", "image": map[string]string{"link": img}},
+			},
+		})
 	}
 
 	// Explicit body_params: ["a","b"]
@@ -168,22 +196,48 @@ func buildTemplateComponents(req SendRequest) []interface{} {
 			}
 		}
 		if len(params) > 0 {
-			return []interface{}{
-				map[string]interface{}{"type": "body", "parameters": params},
-			}
+			comps = append(comps, map[string]interface{}{"type": "body", "parameters": params})
 		}
+	} else if body := dataString(req.Data, "body", "text", "message"); body != "" {
+		comps = append(comps, map[string]interface{}{
+			"type": "body",
+			"parameters": []map[string]string{
+				{"type": "text", "text": body},
+			},
+		})
 	}
 
-	body := dataString(req.Data, "body", "text", "message")
-	if body != "" {
-		return []interface{}{
-			map[string]interface{}{
-				"type": "body",
-				"parameters": []map[string]string{
-					{"type": "text", "text": body},
-				},
-			},
+	// URL button dynamic suffix (tournament_registration_*, payment_reminder_dns).
+	if urlParam := dataString(req.Data, "button_url_param", "url_button_param", "button_param"); urlParam != "" {
+		idx := dataString(req.Data, "button_url_index", "button_index")
+		if idx == "" {
+			idx = "0"
 		}
+		comps = append(comps, map[string]interface{}{
+			"type":     "button",
+			"sub_type": "url",
+			"index":    idx,
+			"parameters": []map[string]string{
+				{"type": "text", "text": urlParam},
+			},
+		})
 	}
-	return nil
+
+	// Quick-reply payload (hello_world1).
+	if payload := dataString(req.Data, "quick_reply_payload", "button_payload"); payload != "" {
+		idx := dataString(req.Data, "quick_reply_index")
+		if idx == "" {
+			idx = "1"
+		}
+		comps = append(comps, map[string]interface{}{
+			"type":     "button",
+			"sub_type": "quick_reply",
+			"index":    idx,
+			"parameters": []map[string]string{
+				{"type": "payload", "payload": payload},
+			},
+		})
+	}
+
+	return comps
 }

@@ -59,6 +59,43 @@ func (p *Provider) CreateOrder(ctx context.Context, req gateway.CreateRequest) (
 	}, nil
 }
 
+func (p *Provider) CreatePaymentLink(ctx context.Context, req gateway.PaymentLinkRequest) (*gateway.PaymentLinkResult, error) {
+	_ = ctx
+	paise := req.AmountPaise
+	if paise <= 0 && req.Amount > 0 {
+		paise = int64(req.Amount*100 + 0.5)
+	}
+	if paise <= 0 {
+		return nil, fmt.Errorf("invalid_amount")
+	}
+	cur := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if cur == "" {
+		cur = "INR"
+	}
+	id := fmt.Sprintf("plink_stub_%d", time.Now().UnixNano())
+	// Prefer caller callback as the stub "pay" URL when provided.
+	url := strings.TrimSpace(req.CallbackURL)
+	if url == "" {
+		url = "https://rzp.io/i/" + id
+	}
+	return &gateway.PaymentLinkResult{
+		Provider:    "stub",
+		LinkID:      id,
+		ShortURL:    url,
+		Status:      "created",
+		AmountPaise: paise,
+		Currency:    cur,
+	}, nil
+}
+
+func (p *Provider) CancelPaymentLink(ctx context.Context, linkID string) error {
+	_ = ctx
+	if strings.TrimSpace(linkID) == "" {
+		return fmt.Errorf("invalid_link_id")
+	}
+	return nil
+}
+
 func (p *Provider) Verify(ctx context.Context, req gateway.VerifyRequest) (*gateway.VerifyResult, error) {
 	_ = ctx
 	if req.ExternalOrderID == "" || req.PaymentID == "" {

@@ -75,12 +75,30 @@ CREATE TABLE IF NOT EXISTS student_attendance (
                     CHECK (status IN ('present','absent','leave')),
   marked_by         BIGINT NULL,
   notes             TEXT NULL,
+  leave_reason      TEXT NOT NULL DEFAULT '',
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (enrollment_id, attendance_date)
 );
+ALTER TABLE student_attendance ADD COLUMN IF NOT EXISTS leave_reason TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_student_attendance_facility_date
   ON student_attendance(facility_id, attendance_date);
+
+CREATE TABLE IF NOT EXISTS student_coaching_plans (
+  id              BIGSERIAL PRIMARY KEY,
+  facility_id     BIGINT NOT NULL,
+  name            VARCHAR(128) NOT NULL,
+  total_fee       NUMERIC(12,2) NOT NULL DEFAULT 0,
+  days_per_week   INT NOT NULL DEFAULT 0,
+  description     TEXT NOT NULL DEFAULT '',
+  status          VARCHAR(16) NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active','inactive')),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (facility_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_student_coaching_plans_facility
+  ON student_coaching_plans(facility_id, status);
 `)
 	return err
 }

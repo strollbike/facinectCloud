@@ -24,6 +24,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /v1/gateway/providers", s.withAuth(s.handleProviders))
 	mux.HandleFunc("POST /v1/gateway/orders", s.withAuth(s.handleCreateOrder))
+	mux.HandleFunc("POST /v1/gateway/payment-links", s.withAuth(s.handleCreatePaymentLink))
+	mux.HandleFunc("POST /v1/gateway/payment-links/{linkId}/cancel", s.withAuth(s.handleCancelPaymentLink))
 	mux.HandleFunc("POST /v1/gateway/verify", s.withAuth(s.handleVerify))
 
 	// Webhooks: provider signature, no JWT
@@ -145,6 +147,34 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request, _ *au
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleCreatePaymentLink(w http.ResponseWriter, r *http.Request, _ *authCtx) {
+	var in gateway.PaymentLinkRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	res, err := s.Gateway.CreatePaymentLink(r.Context(), in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+
+func (s *Server) handleCancelPaymentLink(w http.ResponseWriter, r *http.Request, _ *authCtx) {
+	linkID := strings.TrimSpace(r.PathValue("linkId"))
+	if linkID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_link_id"})
+		return
+	}
+	if err := s.Gateway.CancelPaymentLink(r.Context(), linkID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "link_id": linkID, "status": "cancelled"})
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request, _ *authCtx) {

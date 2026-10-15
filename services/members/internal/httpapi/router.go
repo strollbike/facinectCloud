@@ -346,7 +346,8 @@ func (s *Server) handleDeletePlan(w http.ResponseWriter, r *http.Request, ac *au
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.Members.DeletePlan(r.Context(), fid, pid); err != nil {
+	planName, err := s.Members.DeletePlan(r.Context(), fid, pid)
+	if err != nil {
 		code := http.StatusBadRequest
 		if err.Error() == "not_found" {
 			code = http.StatusNotFound
@@ -354,7 +355,10 @@ func (s *Server) handleDeletePlan(w http.ResponseWriter, r *http.Request, ac *au
 		writeJSON(w, code, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"plan_name": planName,
+	})
 }
 
 func (s *Server) handleGetPlanSettings(w http.ResponseWriter, r *http.Request, ac *authCtx) {

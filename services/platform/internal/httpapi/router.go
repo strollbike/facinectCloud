@@ -245,7 +245,16 @@ func (s *Server) handleNewsList(w http.ResponseWriter, r *http.Request, ac *auth
 	audience := r.URL.Query().Get("audience")
 	fid, _ := strconv.ParseInt(r.URL.Query().Get("facilityId"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	out, err := s.Platform.ListNews(r.Context(), audience, fid, limit)
+	ids := []int64{}
+	if raw := strings.TrimSpace(r.URL.Query().Get("facilityIds")); raw != "" {
+		for _, p := range strings.Split(raw, ",") {
+			n, _ := strconv.ParseInt(strings.TrimSpace(p), 10, 64)
+			if n > 0 {
+				ids = append(ids, n)
+			}
+		}
+	}
+	out, err := s.Platform.ListNews(r.Context(), audience, fid, ids, limit)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

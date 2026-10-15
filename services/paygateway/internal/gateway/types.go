@@ -32,6 +32,29 @@ type CreateResult struct {
 	Checkout        map[string]interface{} `json:"checkout"`
 }
 
+// PaymentLinkRequest creates a shareable Razorpay (or stub) payment URL for WhatsApp.
+type PaymentLinkRequest struct {
+	Provider    string                 `json:"provider"`
+	Amount      float64                `json:"amount"`
+	AmountPaise int64                  `json:"amount_paise"`
+	Currency    string                 `json:"currency"`
+	Description string                 `json:"description"`
+	Customer    Customer               `json:"customer"`
+	CallbackURL string                 `json:"callback_url"`
+	Metadata    map[string]interface{} `json:"metadata"`
+	FacilityID  *int64                 `json:"facility_id"`
+	ExpireBy    int64                  `json:"expire_by"` // unix seconds; 0 = provider default
+}
+
+type PaymentLinkResult struct {
+	Provider   string `json:"provider"`
+	LinkID     string `json:"link_id"`
+	ShortURL   string `json:"short_url"`
+	Status     string `json:"status"`
+	AmountPaise int64 `json:"amount_paise"`
+	Currency   string `json:"currency"`
+}
+
 type VerifyRequest struct {
 	Provider        string `json:"provider"`
 	ExternalOrderID string `json:"external_order_id"`

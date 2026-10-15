@@ -18,6 +18,8 @@ type Config struct {
 	JWTPublicKeyPath string
 	JWTIssuer        string
 	JWTAudience      string
+	NotificationsURL string
+	NotificationsKey string
 }
 
 func FromEnv() Config {
@@ -34,6 +36,8 @@ func FromEnv() Config {
 		JWTPublicKeyPath: getenv("JWT_PUBLIC_KEY_PATH", "/keys/jwt_public.pem"),
 		JWTIssuer:        getenv("JWT_ISSUER", "https://api.facinect.local"),
 		JWTAudience:      getenv("JWT_AUDIENCE", "facinect-apps"),
+		NotificationsURL: strings.TrimRight(getenv("NOTIFICATIONS_BASE_URL", "http://notifications:8080"), "/"),
+		NotificationsKey: strings.TrimSpace(os.Getenv("NOTIFICATIONS_SERVICE_KEY")),
 	}
 }
 

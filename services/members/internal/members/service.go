@@ -207,7 +207,13 @@ RETURNING id`,
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return s.GetMembership(ctx, membershipID)
+	row, err := s.GetMembership(ctx, membershipID)
+	if err != nil {
+		return nil, err
+	}
+	// Best-effort Meta template (PHP member_edit.php parity).
+	s.notifyMemberRegistrationConfirmation(ctx, row)
+	return row, nil
 }
 
 func (s *Service) GetMembership(ctx context.Context, membershipID int64) (*MemberRow, error) {

@@ -21,7 +21,6 @@ function SettingsBody() {
   const router = useRouter();
   const params = useParams<{ slug: string }>();
   const [user, setUser] = useState<SessionUser | null>(null);
-  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [msg, setMsg] = useState('');
@@ -46,10 +45,6 @@ function SettingsBody() {
     e.preventDefault();
     setMsg('');
     setErr('');
-    if (user?.has_password && !currentPassword.trim()) {
-      setErr('Current password is required.');
-      return;
-    }
     if (newPassword.length < 8) {
       setErr('Password must be at least 8 characters.');
       return;
@@ -73,21 +68,22 @@ function SettingsBody() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          current_password: currentPassword,
           new_password: newPassword,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
         const code = data.error || 'failed';
-        if (code === 'password_too_short') setErr('Password must be at least 8 characters.');
-        else if (code === 'current_password_required') setErr('Current password is required.');
-        else if (code === 'invalid_current_password') setErr('Current password is incorrect.');
-        else setErr(code);
+        if (code === 'password_too_short') {
+          setErr('Password must be at least 8 characters.');
+        } else if (code === 'invalid_current_password') {
+          setErr('Current password is incorrect.');
+        } else {
+          setErr(code);
+        }
         return;
       }
       setMsg('Password updated.');
-      setCurrentPassword('');
       setNewPassword('');
       setConfirm('');
       const refreshed = await fetchSession();
@@ -141,23 +137,10 @@ function SettingsBody() {
       <section className={styles.panel} style={{ marginBottom: 16 }}>
         <h2>Set password</h2>
         <p style={{ marginBottom: 14 }}>
-          {user?.has_password
-            ? 'Update your login password. Current password is required.'
-            : 'Set a login password for this partner account (first time).'}
+          Set or update the login password for this partner account. No current
+          password required.
         </p>
         <form onSubmit={onSetPassword} className={styles.settingsForm}>
-          {user?.has_password ? (
-            <label>
-              Current password
-              <input
-                type="password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-              />
-            </label>
-          ) : null}
           <label>
             New password
             <input

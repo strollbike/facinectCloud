@@ -88,9 +88,19 @@ type UpdatePlanInput struct {
 }
 
 type PlanRow struct {
-	PlanID   int64  `json:"plan_id"`
-	PlanName string `json:"plan_name"`
-	Count    int    `json:"student_count"`
+	PlanID      int64   `json:"plan_id"`
+	PlanName    string  `json:"plan_name"`
+	Count       int     `json:"student_count"`
+	TotalFee    float64 `json:"total_fee"`
+	DaysPerWeek int     `json:"days_per_week"`
+	Description string  `json:"description,omitempty"`
+}
+
+type CreatePlanInput struct {
+	PlanName    string
+	TotalFee    float64
+	DaysPerWeek int
+	Description string
 }
 
 func (s *Service) ListStudents(ctx context.Context, facilityID int64, sportID *int64, status string) ([]StudentRow, error) {
@@ -224,7 +234,12 @@ RETURNING id`,
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return s.GetEnrollment(ctx, enrollmentID)
+	row, err := s.GetEnrollment(ctx, enrollmentID)
+	if err != nil {
+		return nil, err
+	}
+	s.notifyStudentRegistrationConfirmation(ctx, row)
+	return row, nil
 }
 
 func (s *Service) GetEnrollment(ctx context.Context, enrollmentID int64) (*StudentRow, error) {
@@ -299,7 +314,13 @@ ORDER BY s.first_name, s.last_name, e.id`, facilityID, date)
 	return out, rows.Err()
 }
 
-func (s *Service) MarkAttendance(ctx context.Context, facilityID int64, in MarkAttendanceInput) (*AttendanceRow, error) {
+type MarkAttendanceResult struct {
+	Attendance AttendanceRow         `json:"attendance"`
+	Push       AttendancePushResult  `json:"push"`
+	Activated  bool                  `json:"activated,omitempty"`
+}
+
+func (s *Service) MarkAttendance(ctx context.Context, facilityID int64, in MarkAttendanceInput) (*MarkAttendanceResult, error) {
 	status := strings.ToLower(strings.TrimSpace(in.Status))
 	if facilityID <= 0 || in.EnrollmentID <= 0 {
 		return nil, fmt.Errorf("invalid_attendance")
@@ -345,38 +366,49 @@ SET status=EXCLUDED.status,
 		return nil, err
 	}
 
+	activated := false
 	// Present / late-as-leave on inactive → reactivate (legacy mark_attendance_status1).
 	if status == "present" && enrStatus != "active" {
 		_, _ = s.DB.ExecContext(ctx, `
 UPDATE student_enrollments SET status='active', updated_at=NOW() WHERE id=$1`, in.EnrollmentID)
+		activated = true
 	}
 
+	var att AttendanceRow
 	list, err := s.ListAttendance(ctx, facilityID, in.Date)
 	if err != nil {
 		return nil, err
 	}
+	found := false
 	for i := range list {
 		if list[i].EnrollmentID == in.EnrollmentID {
-			return &list[i], nil
+			att = list[i]
+			found = true
+			break
 		}
 	}
-	// Inactive enrollments are omitted from ListAttendance — synthesize row.
-	row, gerr := s.GetEnrollment(ctx, in.EnrollmentID)
-	if gerr != nil {
-		return nil, fmt.Errorf("attendance_not_found")
+	if !found {
+		// Inactive enrollments are omitted from ListAttendance — synthesize row.
+		row, gerr := s.GetEnrollment(ctx, in.EnrollmentID)
+		if gerr != nil {
+			return nil, fmt.Errorf("attendance_not_found")
+		}
+		att = AttendanceRow{
+			EnrollmentID:   row.EnrollmentID,
+			StudentID:      row.StudentID,
+			FacilityID:     row.FacilityID,
+			FirstName:      row.FirstName,
+			LastName:       row.LastName,
+			Phone:          row.Phone,
+			PlanName:       row.PlanName,
+			AttendanceDate: in.Date,
+			Status:         status,
+			Notes:          strings.TrimSpace(in.Notes),
+		}
 	}
-	return &AttendanceRow{
-		EnrollmentID:   row.EnrollmentID,
-		StudentID:      row.StudentID,
-		FacilityID:     row.FacilityID,
-		FirstName:      row.FirstName,
-		LastName:       row.LastName,
-		Phone:          row.Phone,
-		PlanName:       row.PlanName,
-		AttendanceDate: in.Date,
-		Status:         status,
-		Notes:          strings.TrimSpace(in.Notes),
-	}, nil
+
+	push := s.notifyStudentAttendance(ctx, facilityID, in.EnrollmentID, in.Date, status)
+	return &MarkAttendanceResult{Attendance: att, Push: push, Activated: activated}, nil
 }
 
 func (s *Service) UpdateEnrollmentStatus(ctx context.Context, facilityID, enrollmentID int64, status string) (*StudentRow, error) {
@@ -486,7 +518,61 @@ func (s *Service) ListPlans(ctx context.Context, facilityID int64) ([]PlanRow, e
 	if facilityID <= 0 {
 		return nil, fmt.Errorf("invalid_facility")
 	}
-	rows, err := s.DB.QueryContext(ctx, `
+
+	// Prefer persistent catalogue; merge enrollment-only names.
+	byName := map[string]*PlanRow{}
+	order := []string{}
+
+	add := func(p PlanRow) {
+		key := strings.ToLower(strings.TrimSpace(p.PlanName))
+		if key == "" {
+			return
+		}
+		if cur, ok := byName[key]; ok {
+			if p.PlanID > 0 && cur.PlanID == 0 {
+				cur.PlanID = p.PlanID
+			}
+			if p.Count > cur.Count {
+				cur.Count = p.Count
+			}
+			if p.TotalFee > 0 && cur.TotalFee == 0 {
+				cur.TotalFee = p.TotalFee
+			}
+			if p.DaysPerWeek > 0 && cur.DaysPerWeek == 0 {
+				cur.DaysPerWeek = p.DaysPerWeek
+			}
+			if p.Description != "" && cur.Description == "" {
+				cur.Description = p.Description
+			}
+			return
+		}
+		cp := p
+		byName[key] = &cp
+		order = append(order, key)
+	}
+
+	catRows, err := s.DB.QueryContext(ctx, `
+SELECT id, name, COALESCE(total_fee,0), COALESCE(days_per_week,0), COALESCE(description,''),
+  (SELECT COUNT(*)::int FROM student_enrollments e
+   WHERE e.facility_id=$1 AND LOWER(TRIM(COALESCE(e.plan_name,''))) = LOWER(TRIM(p.name)))
+FROM student_coaching_plans p
+WHERE p.facility_id=$1 AND p.status='active'
+ORDER BY p.name`, facilityID)
+	if err == nil {
+		defer catRows.Close()
+		for catRows.Next() {
+			var p PlanRow
+			if err := catRows.Scan(&p.PlanID, &p.PlanName, &p.TotalFee, &p.DaysPerWeek, &p.Description, &p.Count); err != nil {
+				return nil, err
+			}
+			add(p)
+		}
+		if err := catRows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	enrRows, err := s.DB.QueryContext(ctx, `
 SELECT COALESCE(NULLIF(TRIM(plan_name),''),'(No batch)') AS plan_name, COUNT(*)::int
 FROM student_enrollments
 WHERE facility_id=$1
@@ -495,29 +581,75 @@ ORDER BY 1`, facilityID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []PlanRow{}
-	var id int64 = 1
-	for rows.Next() {
+	defer enrRows.Close()
+	for enrRows.Next() {
 		var p PlanRow
-		if err := rows.Scan(&p.PlanName, &p.Count); err != nil {
+		if err := enrRows.Scan(&p.PlanName, &p.Count); err != nil {
 			return nil, err
 		}
-		p.PlanID = id
-		id++
+		add(p)
+	}
+	if err := enrRows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]PlanRow, 0, len(order))
+	synthID := int64(1)
+	for _, key := range order {
+		p := *byName[key]
+		if p.PlanID <= 0 {
+			p.PlanID = synthID
+			synthID++
+		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-func (s *Service) CreatePlan(ctx context.Context, facilityID int64, planName string) (*PlanRow, error) {
-	name := strings.TrimSpace(planName)
+func (s *Service) CreatePlan(ctx context.Context, facilityID int64, in CreatePlanInput) (*PlanRow, error) {
+	name := strings.TrimSpace(in.PlanName)
 	if facilityID <= 0 || name == "" {
 		return nil, fmt.Errorf("invalid_plan")
 	}
-	// Plans are synthetic (plan_name on enrollments). Creating a plan is a no-op
-	// registry row — return the name so UI can assign it on enroll.
-	return &PlanRow{PlanID: time.Now().Unix()%100000 + 1, PlanName: name, Count: 0}, nil
+	days := in.DaysPerWeek
+	if days < 0 {
+		days = 0
+	}
+	if days > 7 {
+		days = 7
+	}
+	desc := strings.TrimSpace(in.Description)
+
+	var id int64
+	var fee float64
+	var daysOut int
+	var descOut string
+	err := s.DB.QueryRowContext(ctx, `
+INSERT INTO student_coaching_plans (facility_id, name, total_fee, days_per_week, description, status)
+VALUES ($1,$2,$3,$4,$5,'active')
+ON CONFLICT (facility_id, name) DO UPDATE SET
+  total_fee = EXCLUDED.total_fee,
+  days_per_week = EXCLUDED.days_per_week,
+  description = CASE WHEN EXCLUDED.description <> '' THEN EXCLUDED.description ELSE student_coaching_plans.description END,
+  status = 'active',
+  updated_at = NOW()
+RETURNING id, total_fee, days_per_week, COALESCE(description,'')`,
+		facilityID, name, in.TotalFee, days, desc,
+	).Scan(&id, &fee, &daysOut, &descOut)
+	if err != nil {
+		return nil, err
+	}
+
+	var count int
+	_ = s.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM student_enrollments
+WHERE facility_id=$1 AND LOWER(TRIM(COALESCE(plan_name,''))) = LOWER($2)`,
+		facilityID, name).Scan(&count)
+
+	return &PlanRow{
+		PlanID: id, PlanName: name, Count: count,
+		TotalFee: fee, DaysPerWeek: daysOut, Description: descOut,
+	}, nil
 }
 
 func validateDate(date string) error {

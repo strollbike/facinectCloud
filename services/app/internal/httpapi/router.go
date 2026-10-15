@@ -25,6 +25,7 @@ func (s *Server) Handler() http.Handler {
 
 	// PHP-compatible consumer endpoints (POST action JSON).
 	mux.HandleFunc("POST /v1/app/users_lookup", s.handleUsersLookup)
+	mux.HandleFunc("GET /v1/app/facilities_nearby", s.handleFacilitiesNearby)
 	mux.HandleFunc("POST /v1/app/facilities_nearby", s.handleFacilitiesNearby)
 	mux.HandleFunc("GET /v1/app/get_slots", s.handleGetSlots)
 	mux.HandleFunc("POST /v1/app/get_slots", s.handleGetSlots)
@@ -38,13 +39,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/app/live_arena", s.handleLiveArena)
 	mux.HandleFunc("GET /v1/app/score_live", s.handleScoreLive)
 	mux.HandleFunc("POST /v1/app/score_live", s.handleScoreLive)
+	mux.HandleFunc("GET /v1/app/score_follows", s.handleScoreFollows)
 	mux.HandleFunc("POST /v1/app/score_follows", s.handleScoreFollows)
 	mux.HandleFunc("POST /v1/app/facility_feedback", s.handleFacilityFeedback)
 	mux.HandleFunc("POST /v1/app/facility_customer_access", s.handleFacilityAccess)
+	mux.HandleFunc("GET /v1/app/app_notifications", s.handleAppNotifications)
 	mux.HandleFunc("POST /v1/app/app_notifications", s.handleAppNotifications)
 	mux.HandleFunc("POST /v1/app/fcm_register", s.handleFCMRegister)
 	mux.HandleFunc("POST /v1/app/news", s.handleNewsProxyHint)
 	mux.HandleFunc("POST /v1/app/privacy", s.handlePrivacyProxyHint)
+	mux.HandleFunc("GET /v1/app/geo_ip", s.handleGeoIP)
+	mux.HandleFunc("POST /v1/app/geo_ip", s.handleGeoIP)
 
 	return s.withCORS(mux)
 }
@@ -123,10 +128,19 @@ func (s *Server) handleUsersLookup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFacilitiesNearby(w http.ResponseWriter, r *http.Request) {
-	body, err := s.readBody(r)
-	if err != nil {
-		phpOK(w, false, "invalid_json", nil, 400)
-		return
+	body := map[string]any{}
+	if r.Method == http.MethodPost {
+		var err error
+		body, err = s.readBody(r)
+		if err != nil {
+			phpOK(w, false, "invalid_json", nil, 400)
+			return
+		}
+	}
+	for k, v := range s.queryMap(r) {
+		if _, exists := body[k]; !exists || fmtSprint(body[k]) == "" {
+			body[k] = v
+		}
 	}
 	ok, msg, data := s.App.FacilitiesNearby(r.Context(), body)
 	phpOK(w, ok, msg, data, 0)
@@ -268,10 +282,19 @@ func (s *Server) handleScoreLive(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleScoreFollows(w http.ResponseWriter, r *http.Request) {
-	body, err := s.readBody(r)
-	if err != nil {
-		phpOK(w, false, "invalid_json", nil, 400)
-		return
+	body := map[string]any{}
+	if r.Method == http.MethodPost {
+		var err error
+		body, err = s.readBody(r)
+		if err != nil {
+			phpOK(w, false, "invalid_json", nil, 400)
+			return
+		}
+	}
+	for k, v := range s.queryMap(r) {
+		if _, exists := body[k]; !exists || fmtSprint(body[k]) == "" {
+			body[k] = v
+		}
 	}
 	ok, msg, data := s.App.ScoreFollows(r.Context(), body)
 	phpOK(w, ok, msg, data, 0)
@@ -298,10 +321,19 @@ func (s *Server) handleFacilityAccess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAppNotifications(w http.ResponseWriter, r *http.Request) {
-	body, err := s.readBody(r)
-	if err != nil {
-		phpOK(w, false, "invalid_json", nil, 400)
-		return
+	body := map[string]any{}
+	if r.Method == http.MethodPost {
+		var err error
+		body, err = s.readBody(r)
+		if err != nil {
+			phpOK(w, false, "invalid_json", nil, 400)
+			return
+		}
+	}
+	for k, v := range s.queryMap(r) {
+		if _, exists := body[k]; !exists || fmtSprint(body[k]) == "" {
+			body[k] = v
+		}
 	}
 	ok, msg, data := s.App.AppNotifications(r.Context(), body)
 	phpOK(w, ok, msg, data, 0)
@@ -323,4 +355,35 @@ func (s *Server) handleNewsProxyHint(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePrivacyProxyHint(w http.ResponseWriter, r *http.Request) {
 	phpOK(w, true, "use /v1/privacy", map[string]any{}, 200)
+}
+
+func (s *Server) handleGeoIP(w http.ResponseWriter, r *http.Request) {
+	ip := app.ClientIPFromRequest(r)
+	if r.Method == http.MethodPost {
+		body, _ := s.readBody(r)
+		if v := strings.TrimSpace(fmtSprint(body["ip"])); v != "" {
+			ip = v
+		}
+	}
+	if q := strings.TrimSpace(r.URL.Query().Get("ip")); q != "" {
+		ip = q
+	}
+	res := s.App.ResolveGeoIP(r.Context(), ip)
+	if !res.OK {
+		phpOK(w, false, res.Message, map[string]any{
+			"source":  res.Source,
+			"queryIp": res.QueryIP,
+		}, 200)
+		return
+	}
+	phpOK(w, true, "OK", map[string]any{
+		"latitude":  res.Latitude,
+		"longitude": res.Longitude,
+		"city":      res.City,
+		"region":    res.Region,
+		"country":   res.Country,
+		"queryIp":   res.QueryIP,
+		"source":    res.Source,
+		"approx":    true,
+	}, 200)
 }

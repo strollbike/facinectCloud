@@ -296,23 +296,44 @@ func (s *Service) SportsCatalog() map[string]interface{} {
 
 // --- News ---
 
-func (s *Service) ListNews(ctx context.Context, audience string, facilityID int64, limit int) (map[string]interface{}, error) {
+func (s *Service) ListNews(ctx context.Context, audience string, facilityID int64, facilityIDs []int64, limit int) (map[string]interface{}, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
+	aud := strings.TrimSpace(audience)
+	if aud == "end_users" {
+		aud = "end_users"
+	}
+	ids := append([]int64{}, facilityIDs...)
+	if facilityID > 0 {
+		ids = append(ids, facilityID)
+	}
+	seen := map[int64]struct{}{}
+	uniq := []int64{}
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+
 	q := `
-SELECT id, title, COALESCE(body,''), audience, facility_id, published_at::text
+SELECT id, title, COALESCE(body,''), audience, facility_id, published_at::text, created_at::text
 FROM platform_news WHERE 1=1`
 	args := []interface{}{}
 	n := 1
-	if strings.TrimSpace(audience) != "" {
-		q += fmt.Sprintf(` AND (audience=$%d OR audience='all')`, n)
-		args = append(args, strings.TrimSpace(audience))
+	if aud != "" {
+		q += fmt.Sprintf(` AND (audience=$%d OR audience='all' OR audience='end_users')`, n)
+		args = append(args, aud)
 		n++
 	}
-	if facilityID > 0 {
-		q += fmt.Sprintf(` AND (facility_id IS NULL OR facility_id=$%d)`, n)
-		args = append(args, facilityID)
+	if len(uniq) > 0 {
+		q += fmt.Sprintf(` AND (facility_id IS NULL OR facility_id = ANY($%d::bigint[]))`, n)
+		args = append(args, uniq)
 		n++
 	}
 	q += fmt.Sprintf(` ORDER BY published_at DESC LIMIT $%d`, n)
@@ -326,20 +347,26 @@ FROM platform_news WHERE 1=1`
 	items := []map[string]interface{}{}
 	for rows.Next() {
 		var id int64
-		var title, body, aud, published string
+		var title, body, a, published, created string
 		var fid sql.NullInt64
-		if err := rows.Scan(&id, &title, &body, &aud, &fid, &published); err != nil {
+		if err := rows.Scan(&id, &title, &body, &a, &fid, &published, &created); err != nil {
 			return nil, err
 		}
 		item := map[string]interface{}{
-			"id": id, "title": title, "body": body, "audience": aud, "published_at": published,
+			"id": id, "title": title, "body": body, "audience": a,
+			"published_at": published, "createdAt": created, "created_at": created,
+			"imageUrl": "", "expiresAt": "",
 		}
 		if fid.Valid {
 			item["facilityId"] = fid.Int64
 		}
 		items = append(items, item)
 	}
-	return map[string]interface{}{"success": true, "data": items}, rows.Err()
+	return map[string]interface{}{
+		"success": true,
+		"message": "OK",
+		"data":    map[string]interface{}{"items": items, "count": len(items)},
+	}, rows.Err()
 }
 
 func (s *Service) SaveNews(ctx context.Context, newsID int64, userKey string) (map[string]interface{}, error) {
@@ -486,13 +513,83 @@ SELECT version, pages_enabled FROM platform_controls_version WHERE facility_id=$
 // --- Privacy ---
 
 type PrivacyIn struct {
-	Action      string          `json:"action"`
-	FacilityID  int64           `json:"facilityId"`
-	Email       string          `json:"email"`
-	WhatsappNo  string          `json:"whatsappNo"`
-	Text        string          `json:"text"`
-	Version     string          `json:"version"`
-	Payload     json.RawMessage `json:"payload"`
+	Action         string          `json:"action"`
+	FacilityID     int64           `json:"facilityId"`
+	UserID         int64           `json:"userId"`
+	Email          string          `json:"email"`
+	WhatsappNo     string          `json:"whatsappNo"`
+	Text           string          `json:"text"`
+	Version        string          `json:"version"`
+	PolicyType     string          `json:"policyType"`
+	PolicyVersion  string          `json:"policyVersion"`
+	Source         string          `json:"source"`
+	Payload        json.RawMessage `json:"payload"`
+}
+
+const platformUsersVersion = "1.0"
+
+func privacyIdentityKey(in PrivacyIn) string {
+	email := strings.TrimSpace(strings.ToLower(in.Email))
+	if email != "" {
+		return email
+	}
+	if in.UserID > 0 {
+		return fmt.Sprintf("uid:%d", in.UserID)
+	}
+	wa := strings.TrimSpace(in.WhatsappNo)
+	if wa != "" {
+		return "wa:" + wa
+	}
+	return ""
+}
+
+func (s *Service) privacyHasAccept(ctx context.Context, key, policyType string, facilityID int64, version string) bool {
+	if key == "" {
+		return false
+	}
+	var accepted bool
+	err := s.DB.QueryRowContext(ctx, `
+SELECT accepted FROM platform_privacy
+WHERE email=$1 AND action='accept'
+  AND COALESCE(payload->>'policyType','platform_users') = $2
+  AND COALESCE(facility_id,0) = $3
+  AND ($4='' OR COALESCE(payload->>'version', payload->>'policyVersion', '1.0') = $4)
+  AND accepted = TRUE
+ORDER BY updated_at DESC LIMIT 1`, key, policyType, facilityID, version).Scan(&accepted)
+	return err == nil && accepted
+}
+
+func (s *Service) facilityPrivacyMeta(ctx context.Context, facilityID int64) (text, version, name string, hasPolicy, askEnabled bool) {
+	version = "1.0"
+	askEnabled = true
+	var p []byte
+	err := s.DB.QueryRowContext(ctx, `
+SELECT payload FROM platform_privacy
+WHERE facility_id=$1 AND action='save_facility'
+ORDER BY updated_at DESC LIMIT 1`, facilityID).Scan(&p)
+	if err == nil {
+		var raw map[string]interface{}
+		_ = json.Unmarshal(p, &raw)
+		if raw != nil {
+			if t, ok := raw["text"].(string); ok {
+				text = t
+			}
+			if v, ok := raw["version"].(string); ok && strings.TrimSpace(v) != "" {
+				version = strings.TrimSpace(v)
+			}
+			if a, ok := raw["askEnabled"].(bool); ok {
+				askEnabled = a
+			}
+		}
+	}
+	hasPolicy = askEnabled && strings.TrimSpace(text) != ""
+	_ = s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(name,'') FROM app_facilities WHERE id=$1`, facilityID).Scan(&name)
+	if name == "" {
+		_ = s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(name,'') FROM facilities WHERE id=$1`, facilityID).Scan(&name)
+	}
+	return text, version, name, hasPolicy, askEnabled
 }
 
 func (s *Service) Privacy(ctx context.Context, in PrivacyIn) (map[string]interface{}, error) {
@@ -500,91 +597,169 @@ func (s *Service) Privacy(ctx context.Context, in PrivacyIn) (map[string]interfa
 	payload := in.Payload
 	if len(payload) == 0 {
 		blob, _ := json.Marshal(map[string]interface{}{
-			"text":       in.Text,
-			"version":    in.Version,
-			"whatsappNo": in.WhatsappNo,
+			"text":          in.Text,
+			"version":       firstNonEmptyStr(in.PolicyVersion, in.Version, platformUsersVersion),
+			"policyVersion": firstNonEmptyStr(in.PolicyVersion, in.Version, platformUsersVersion),
+			"policyType":    firstNonEmptyStr(in.PolicyType, "platform_users"),
+			"whatsappNo":    in.WhatsappNo,
+			"userId":        in.UserID,
+			"source":        firstNonEmptyStr(in.Source, "app"),
 		})
 		payload = blob
 	}
-	email := strings.TrimSpace(strings.ToLower(in.Email))
-	if email == "" && in.WhatsappNo != "" {
-		email = "wa:" + strings.TrimSpace(in.WhatsappNo)
-	}
+	key := privacyIdentityKey(in)
 	switch action {
 	case "get_facility":
-		var p []byte
-		var accepted bool
-		err := s.DB.QueryRowContext(ctx, `
-SELECT payload, accepted FROM platform_privacy
-WHERE facility_id=$1 AND action='save_facility'
-ORDER BY updated_at DESC LIMIT 1`, in.FacilityID).Scan(&p, &accepted)
-		if err == sql.ErrNoRows {
-			return map[string]interface{}{
-				"success": true,
-				"data":    map[string]interface{}{"text": "", "version": "1.0", "source": "gateway"},
-			}, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		var raw map[string]interface{}
-		_ = json.Unmarshal(p, &raw)
-		if raw == nil {
-			raw = map[string]interface{}{}
-		}
-		text, _ := raw["text"].(string)
-		version, _ := raw["version"].(string)
-		if version == "" {
-			version = "1.0"
-		}
+		text, version, name, hasPolicy, askEnabled := s.facilityPrivacyMeta(ctx, in.FacilityID)
 		return map[string]interface{}{
 			"success": true,
+			"message": "Facility privacy.",
 			"data": map[string]interface{}{
-				"text":     text,
-				"version":  version,
-				"accepted": accepted,
-				"source":   "gateway",
+				"facilityId":   in.FacilityID,
+				"facilityName": name,
+				"hasPolicy":    hasPolicy,
+				"askEnabled":   askEnabled,
+				"text":         text,
+				"version":      version,
+				"url":          fmt.Sprintf("/legal/privacy_facility.php?facilityId=%d", in.FacilityID),
+				"source":       "gateway",
 			},
 		}, nil
 	case "check":
-		var accepted bool
-		key := email
-		err := s.DB.QueryRowContext(ctx, `
-SELECT accepted FROM platform_privacy
-WHERE email=$1 AND action='accept'
-ORDER BY updated_at DESC LIMIT 1`, key).Scan(&accepted)
-		if err == sql.ErrNoRows {
-			return map[string]interface{}{"success": true, "data": map[string]interface{}{"accepted": false}}, nil
+		if key == "" {
+			return map[string]interface{}{
+				"success": false,
+				"message": "userId or whatsappNo is required.",
+			}, nil
 		}
-		if err != nil {
-			return nil, err
+		platAccepted := s.privacyHasAccept(ctx, key, "platform_users", 0, platformUsersVersion)
+		platform := map[string]interface{}{
+			"accepted":        platAccepted,
+			"needsAccept":     !platAccepted,
+			"policyType":      "platform_users",
+			"requiredVersion": platformUsersVersion,
 		}
-		return map[string]interface{}{"success": true, "data": map[string]interface{}{"accepted": accepted}}, nil
-	case "save_facility", "accept":
-		accepted := action == "accept"
+		askEnabled := true
+		facilityHas := false
+		var facility map[string]interface{}
+		if in.FacilityID > 0 {
+			_, facVer, facName, has, ask := s.facilityPrivacyMeta(ctx, in.FacilityID)
+			askEnabled = ask
+			facilityHas = has
+			if !askEnabled {
+				return map[string]interface{}{
+					"success": true,
+					"message": "Privacy ask disabled for facility.",
+					"data": map[string]interface{}{
+						"platform": map[string]interface{}{
+							"accepted": true, "needsAccept": false,
+							"policyType": "platform_users", "requiredVersion": platformUsersVersion,
+						},
+						"facility":          nil,
+						"onboarding":        nil,
+						"facilityHasPolicy": false,
+						"askEnabled":        false,
+						"needsPlatform":     false,
+						"needsFacility":     false,
+					},
+				}, nil
+			}
+			if facilityHas {
+				facAccepted := s.privacyHasAccept(ctx, key, "facility", in.FacilityID, facVer)
+				facility = map[string]interface{}{
+					"accepted":        facAccepted,
+					"needsAccept":     !facAccepted,
+					"policyType":      "facility",
+					"requiredVersion": facVer,
+					"facilityId":      in.FacilityID,
+					"facilityName":    facName,
+				}
+			}
+		}
+		needsFacility := facility != nil && facility["needsAccept"] == true
+		return map[string]interface{}{
+			"success": true,
+			"message": "Privacy acceptance status.",
+			"data": map[string]interface{}{
+				"platform":          platform,
+				"facility":          facility,
+				"onboarding":        nil,
+				"facilityHasPolicy": facilityHas,
+				"askEnabled":        askEnabled,
+				"needsPlatform":     !platAccepted,
+				"needsFacility":     needsFacility,
+			},
+		}, nil
+	case "save_facility":
+		blob, _ := json.Marshal(map[string]interface{}{
+			"text":       in.Text,
+			"version":    firstNonEmptyStr(in.Version, platformUsersVersion),
+			"askEnabled": true,
+		})
 		_, err := s.DB.ExecContext(ctx, `
 INSERT INTO platform_privacy (facility_id, email, action, payload, accepted, updated_at)
-VALUES (NULLIF($1,0), NULLIF($2,''), $3, $4::jsonb, $5, NOW())`,
-			in.FacilityID,
-			email,
-			action,
-			string(payload),
-			accepted,
-		)
+VALUES ($1, NULLIF($2,''), 'save_facility', $3::jsonb, FALSE, NOW())`,
+			in.FacilityID, key, string(blob))
 		if err != nil {
 			return nil, err
 		}
 		return map[string]interface{}{
 			"success": true,
+			"message": "Facility privacy policy saved.",
 			"data": map[string]interface{}{
-				"accepted": accepted,
-				"text":     in.Text,
-				"version":  in.Version,
+				"facilityId": in.FacilityID,
+				"text":       in.Text,
+				"version":    firstNonEmptyStr(in.Version, platformUsersVersion),
+			},
+		}, nil
+	case "accept":
+		if key == "" {
+			return map[string]interface{}{"success": false, "message": "userId or whatsappNo is required."}, nil
+		}
+		ptype := strings.ToLower(strings.TrimSpace(in.PolicyType))
+		if ptype == "users" || ptype == "" {
+			ptype = "platform_users"
+		}
+		ver := firstNonEmptyStr(in.PolicyVersion, in.Version, platformUsersVersion)
+		fid := int64(0)
+		if ptype == "facility" {
+			fid = in.FacilityID
+		}
+		blob, _ := json.Marshal(map[string]interface{}{
+			"policyType":    ptype,
+			"version":       ver,
+			"policyVersion": ver,
+			"userId":        in.UserID,
+			"whatsappNo":    in.WhatsappNo,
+			"source":        firstNonEmptyStr(in.Source, "app"),
+		})
+		_, err := s.DB.ExecContext(ctx, `
+INSERT INTO platform_privacy (facility_id, email, action, payload, accepted, updated_at)
+VALUES (NULLIF($1,0), $2, 'accept', $3::jsonb, TRUE, NOW())`,
+			fid, key, string(blob))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"success": true,
+			"message": "Privacy accepted.",
+			"data": map[string]interface{}{
+				"accepted": true, "policyType": ptype, "version": ver, "facilityId": fid,
 			},
 		}, nil
 	default:
 		return nil, fmt.Errorf("invalid_action")
 	}
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v != "" && v != "<nil>" {
+			return v
+		}
+	}
+	return ""
 }
 
 // --- Billing ---

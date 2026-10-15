@@ -121,6 +121,134 @@ func (p *Provider) CreateOrder(ctx context.Context, req gateway.CreateRequest) (
 	}, nil
 }
 
+func (p *Provider) CreatePaymentLink(ctx context.Context, req gateway.PaymentLinkRequest) (*gateway.PaymentLinkResult, error) {
+	if !p.Configured() {
+		return nil, fmt.Errorf("razorpay_not_configured")
+	}
+	paise := req.AmountPaise
+	if paise <= 0 && req.Amount > 0 {
+		paise = int64(req.Amount*100 + 0.5)
+	}
+	if paise <= 0 {
+		return nil, fmt.Errorf("invalid_amount")
+	}
+	cur := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if cur == "" {
+		cur = "INR"
+	}
+	desc := strings.TrimSpace(req.Description)
+	if desc == "" {
+		desc = "Facinect booking payment"
+	}
+	body := map[string]interface{}{
+		"amount":          paise,
+		"currency":        cur,
+		"accept_partial":  false,
+		"description":     desc,
+		"notify":          map[string]bool{"sms": false, "email": false},
+		"reminder_enable": false,
+	}
+	cust := map[string]string{}
+	if n := strings.TrimSpace(req.Customer.Name); n != "" {
+		cust["name"] = n
+	}
+	if e := strings.TrimSpace(req.Customer.Email); e != "" {
+		cust["email"] = e
+	}
+	if ph := strings.TrimSpace(req.Customer.Phone); ph != "" {
+		cust["contact"] = ph
+	}
+	if len(cust) > 0 {
+		body["customer"] = cust
+	}
+	if cb := strings.TrimSpace(req.CallbackURL); cb != "" {
+		body["callback_url"] = cb
+		body["callback_method"] = "get"
+	}
+	if req.ExpireBy > 0 {
+		body["expire_by"] = req.ExpireBy
+	}
+	notes := map[string]interface{}{}
+	for k, v := range req.Metadata {
+		notes[k] = v
+	}
+	if req.FacilityID != nil {
+		notes["facility_id"] = *req.FacilityID
+	}
+	if len(notes) > 0 {
+		body["notes"] = notes
+	}
+	raw, _ := json.Marshal(body)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.razorpay.com/v1/payment_links", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.SetBasicAuth(p.KeyID, p.KeySecret)
+	httpReq.Header.Set("Content-Type", "application/json")
+	res, err := p.HTTP.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode >= 300 {
+		return nil, fmt.Errorf("razorpay_http_%d: %s", res.StatusCode, truncate(string(respBody), 300))
+	}
+	var out struct {
+		ID       string `json:"id"`
+		ShortURL string `json:"short_url"`
+		Status   string `json:"status"`
+		Amount   int64  `json:"amount"`
+		Currency string `json:"currency"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, err
+	}
+	if out.ShortURL == "" {
+		return nil, fmt.Errorf("razorpay_empty_short_url")
+	}
+	return &gateway.PaymentLinkResult{
+		Provider:    "razorpay",
+		LinkID:      out.ID,
+		ShortURL:    out.ShortURL,
+		Status:      out.Status,
+		AmountPaise: out.Amount,
+		Currency:    out.Currency,
+	}, nil
+}
+
+func (p *Provider) CancelPaymentLink(ctx context.Context, linkID string) error {
+	linkID = strings.TrimSpace(linkID)
+	if !p.Configured() {
+		return fmt.Errorf("razorpay_not_configured")
+	}
+	if linkID == "" {
+		return fmt.Errorf("invalid_link_id")
+	}
+	url := "https://api.razorpay.com/v1/payment_links/" + linkID + "/cancel"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	httpReq.SetBasicAuth(p.KeyID, p.KeySecret)
+	httpReq.Header.Set("Content-Type", "application/json")
+	res, err := p.HTTP.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	// 200 OK, or already cancelled/expired — treat as success for idempotency.
+	if res.StatusCode >= 300 {
+		body := strings.ToLower(string(respBody))
+		if strings.Contains(body, "already") || strings.Contains(body, "cancelled") || strings.Contains(body, "expired") {
+			return nil
+		}
+		return fmt.Errorf("razorpay_cancel_http_%d: %s", res.StatusCode, truncate(string(respBody), 300))
+	}
+	return nil
+}
+
 func (p *Provider) Verify(ctx context.Context, req gateway.VerifyRequest) (*gateway.VerifyResult, error) {
 	_ = ctx
 	if !p.Configured() {

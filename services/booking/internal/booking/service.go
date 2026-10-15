@@ -24,15 +24,17 @@ type Court struct {
 }
 
 type Slot struct {
-	ID         int64  `json:"id"`
-	FacilityID int64  `json:"facility_id"`
-	CourtID    int64  `json:"court_id"`
-	CourtName  string `json:"court_name,omitempty"`
-	SlotDate   string `json:"slot_date"`
-	StartTime  string `json:"start_time"`
-	EndTime    string `json:"end_time"`
-	Status     string `json:"status"`
-	Notes      string `json:"notes,omitempty"`
+	ID            int64  `json:"id"`
+	FacilityID    int64  `json:"facility_id"`
+	CourtID       int64  `json:"court_id"`
+	CourtName     string `json:"court_name,omitempty"`
+	SlotDate      string `json:"slot_date"`
+	StartTime     string `json:"start_time"`
+	EndTime       string `json:"end_time"`
+	Status        string `json:"status"`
+	Notes         string `json:"notes,omitempty"`
+	CustomerName  string `json:"customer_name,omitempty"`
+	CustomerPhone string `json:"customer_phone,omitempty"`
 }
 
 type Booking struct {
@@ -61,11 +63,15 @@ type CreateCourtInput struct {
 }
 
 type GenerateSlotsInput struct {
-	Date       string `json:"date"`
-	CourtID    *int64 `json:"court_id"`
-	OpenHour   *int   `json:"open_hour"`
-	CloseHour  *int   `json:"close_hour"`
-	SlotMinutes *int  `json:"slot_minutes"`
+	Date        string `json:"date"`
+	DateTo      string `json:"date_to"`
+	MonthWindow *bool  `json:"month_window"` // Rolling 30 days: today → today+29
+	CourtID     *int64 `json:"court_id"`
+	OpenHour    *int   `json:"open_hour"`
+	CloseHour   *int   `json:"close_hour"`
+	SlotMinutes *int   `json:"slot_minutes"`
+	// Replace=true: wipe Free slots in range and recreate. Aborts if any booked/blocked exist.
+	Replace *bool `json:"replace"`
 }
 
 type CreateBookingInput struct {
@@ -142,9 +148,27 @@ func (s *Service) ListSlots(ctx context.Context, facilityID int64, date string, 
 	}
 	q := `
 SELECT s.id, s.facility_id, s.court_id, c.name, s.slot_date::text, s.start_time::text, s.end_time::text,
-       s.status, COALESCE(s.notes,'')
+       s.status, COALESCE(s.notes,''),
+       COALESCE(NULLIF(bk.customer_name,''), NULLIF(hold.customer_name,''), ''),
+       COALESCE(NULLIF(bk.customer_phone,''), NULLIF(hold.whatsapp,''), '')
 FROM booking_slots s
 JOIN booking_courts c ON c.id = s.court_id
+LEFT JOIN LATERAL (
+  SELECT COALESCE(b.customer_name,'') AS customer_name,
+         COALESCE(b.customer_phone,'') AS customer_phone
+  FROM booking_bookings b
+  WHERE b.slot_id = s.id AND b.status = 'confirmed'
+  ORDER BY b.id DESC
+  LIMIT 1
+) bk ON TRUE
+LEFT JOIN LATERAL (
+  SELECT COALESCE(h.customer_name,'') AS customer_name,
+         COALESCE(h.whatsapp,'') AS whatsapp
+  FROM booking_payment_holds h
+  WHERE h.status = 'pending' AND s.id = ANY(h.slot_ids)
+  ORDER BY h.id DESC
+  LIMIT 1
+) hold ON TRUE
 WHERE s.facility_id=$1 AND s.slot_date=$2::date`
 	args := []interface{}{facilityID, date}
 	if courtID != nil && *courtID > 0 {
@@ -160,64 +184,6 @@ WHERE s.facility_id=$1 AND s.slot_date=$2::date`
 	return scanSlots(rows)
 }
 
-func (s *Service) GenerateSlots(ctx context.Context, facilityID int64, in GenerateSlotsInput) (int, error) {
-	if err := validateDate(in.Date); err != nil {
-		return 0, err
-	}
-	openH := s.Cfg.DefaultOpenHour
-	closeH := s.Cfg.DefaultCloseHour
-	mins := s.Cfg.DefaultSlotMins
-	if in.OpenHour != nil {
-		openH = *in.OpenHour
-	}
-	if in.CloseHour != nil {
-		closeH = *in.CloseHour
-	}
-	if in.SlotMinutes != nil {
-		mins = *in.SlotMinutes
-	}
-	if openH < 0 || closeH > 24 || openH >= closeH || mins < 15 || mins > 240 {
-		return 0, fmt.Errorf("invalid_schedule")
-	}
-
-	courts, err := s.ListCourts(ctx, facilityID)
-	if err != nil {
-		return 0, err
-	}
-	if in.CourtID != nil && *in.CourtID > 0 {
-		filtered := courts[:0]
-		for _, c := range courts {
-			if c.ID == *in.CourtID {
-				filtered = append(filtered, c)
-			}
-		}
-		courts = filtered
-	}
-	if len(courts) == 0 {
-		return 0, fmt.Errorf("no_courts")
-	}
-
-	created := 0
-	day, _ := time.Parse("2006-01-02", in.Date)
-	for _, court := range courts {
-		for t := openH * 60; t+mins <= closeH*60; t += mins {
-			start := fmt.Sprintf("%02d:%02d:00", t/60, t%60)
-			endM := t + mins
-			end := fmt.Sprintf("%02d:%02d:00", endM/60, endM%60)
-			res, err := s.DB.ExecContext(ctx, `
-INSERT INTO booking_slots (facility_id, court_id, slot_date, start_time, end_time, status)
-VALUES ($1, $2, $3::date, $4::time, $5::time, 'available')
-ON CONFLICT (court_id, slot_date, start_time) DO NOTHING`,
-				facilityID, court.ID, day.Format("2006-01-02"), start, end)
-			if err != nil {
-				return created, err
-			}
-			n, _ := res.RowsAffected()
-			created += int(n)
-		}
-	}
-	return created, nil
-}
 
 func (s *Service) BlockSlot(ctx context.Context, slotID int64, notes string) (*Slot, error) {
 	return s.setSlotStatus(ctx, slotID, "available", "blocked", notes)
@@ -321,7 +287,8 @@ RETURNING id`,
 		return nil, err
 	}
 	_, err = tx.ExecContext(ctx, `
-UPDATE booking_slots SET status='booked', updated_at=NOW() WHERE id=$1`, in.SlotID)
+UPDATE booking_slots SET status='booked', notes=NULLIF($2,''), updated_at=NOW() WHERE id=$1`,
+		in.SlotID, strings.TrimSpace(in.Notes))
 	if err != nil {
 		return nil, err
 	}
@@ -502,6 +469,7 @@ func scanSlots(rows *sql.Rows) ([]Slot, error) {
 		var s Slot
 		if err := rows.Scan(
 			&s.ID, &s.FacilityID, &s.CourtID, &s.CourtName, &s.SlotDate, &s.StartTime, &s.EndTime, &s.Status, &s.Notes,
+			&s.CustomerName, &s.CustomerPhone,
 		); err != nil {
 			return nil, err
 		}

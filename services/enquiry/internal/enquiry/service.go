@@ -222,8 +222,9 @@ func (s *Service) Notify(ctx context.Context, facilityID int64, row *EnquiryRow,
 			"whatsapp": row.CustomerPhone,
 		},
 		"data": map[string]interface{}{
-			"body": message,
-			"text": message,
+			"body":        message,
+			"text":        message,
+			"body_params": []string{message},
 		},
 	}
 	raw, _ := json.Marshal(payload)

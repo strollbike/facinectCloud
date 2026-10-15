@@ -184,6 +184,7 @@ services:
       BOOKING_OPEN_HOUR: ${BOOKING_OPEN_HOUR:-6}
       BOOKING_CLOSE_HOUR: ${BOOKING_CLOSE_HOUR:-22}
       BOOKING_SLOT_MINUTES: ${BOOKING_SLOT_MINUTES:-60}
+      BOOKING_SLOT_GEN_INTERVAL_HOURS: ${BOOKING_SLOT_GEN_INTERVAL_HOURS:-24}
     volumes:
       - ./keys:/keys:ro
     depends_on:
@@ -222,6 +223,8 @@ services:
       DB_USER: ${POSTGRES_IDENTITY_USER}
       DB_PASSWORD: ${POSTGRES_IDENTITY_PASSWORD}
       STUDENTS_SERVICE_KEY: ${STUDENTS_SERVICE_KEY:-}
+      NOTIFICATIONS_BASE_URL: http://notifications:8080
+      NOTIFICATIONS_SERVICE_KEY: ${NOTIFICATIONS_SERVICE_KEY:-}
       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
       JWT_ISSUER: ${JWT_ISSUER}
       JWT_AUDIENCE: ${JWT_AUDIENCE}
@@ -232,6 +235,8 @@ services:
       postgres:
         condition: service_healthy
       identity:
+        condition: service_healthy
+      notifications:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/v1/students/health | grep -q '\"status\":\"ok\"'"]
@@ -718,6 +723,9 @@ services:
       DB_PASSWORD: ${POSTGRES_IDENTITY_PASSWORD}
       APP_SERVICE_KEY: ${APP_SERVICE_KEY:-}
       RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      PAYGATEWAY_URL: ${PAYGATEWAY_URL:-http://paygateway:8080}
+      PAYGATEWAY_SERVICE_KEY: ${PAYGATEWAY_SERVICE_KEY:-}
       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
       JWT_ISSUER: ${JWT_ISSUER}
       JWT_AUDIENCE: ${JWT_AUDIENCE}

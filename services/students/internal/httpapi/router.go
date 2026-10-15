@@ -249,12 +249,33 @@ func (s *Server) handleMarkAttendance(w http.ResponseWriter, r *http.Request, ac
 		uid := ac.Principal.UserID
 		in.MarkedBy = &uid
 	}
-	row, err := s.Students.MarkAttendance(r.Context(), fid, in)
+	result, err := s.Students.MarkAttendance(r.Context(), fid, in)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, row)
+	// Flat attendance fields for existing StrollX clients + push stats (PHP parity).
+	out := map[string]interface{}{
+		"enrollment_id":   result.Attendance.EnrollmentID,
+		"student_id":      result.Attendance.StudentID,
+		"facility_id":     result.Attendance.FacilityID,
+		"first_name":      result.Attendance.FirstName,
+		"last_name":       result.Attendance.LastName,
+		"contact_phone":   result.Attendance.Phone,
+		"plan_name":       result.Attendance.PlanName,
+		"attendance_date": result.Attendance.AttendanceDate,
+		"status":          result.Attendance.Status,
+		"notes":           result.Attendance.Notes,
+		"push":            result.Push,
+	}
+	if result.Attendance.AttendanceID != nil {
+		out["attendance_id"] = *result.Attendance.AttendanceID
+	}
+	if result.Activated {
+		out["activated"] = true
+		out["current_status"] = "Active"
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request, ac *authCtx) {
@@ -370,8 +391,11 @@ func (s *Server) handleCreatePlan(w http.ResponseWriter, r *http.Request, ac *au
 		return
 	}
 	var body struct {
-		PlanName string `json:"plan_name"`
-		Name     string `json:"name"`
+		PlanName    string  `json:"plan_name"`
+		Name        string  `json:"name"`
+		TotalFee    float64 `json:"total_fee"`
+		DaysPerWeek int     `json:"days_per_week"`
+		Description string  `json:"description"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
@@ -381,7 +405,12 @@ func (s *Server) handleCreatePlan(w http.ResponseWriter, r *http.Request, ac *au
 	if name == "" {
 		name = strings.TrimSpace(body.Name)
 	}
-	row, err := s.Students.CreatePlan(r.Context(), fid, name)
+	row, err := s.Students.CreatePlan(r.Context(), fid, students.CreatePlanInput{
+		PlanName:    name,
+		TotalFee:    body.TotalFee,
+		DaysPerWeek: body.DaysPerWeek,
+		Description: body.Description,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

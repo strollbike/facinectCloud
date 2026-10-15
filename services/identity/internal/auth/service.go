@@ -618,14 +618,14 @@ func (s *Service) SetPassword(userID int64, currentPassword, newPassword string)
 	if err != nil {
 		return ErrUnauthorized
 	}
-	// Existing password accounts must prove current password; first-time set (OAuth-only) may omit it.
+	// Caller is already JWT-authenticated (partner settings). Current password is
+	// optional: if provided and a hash exists, verify it; otherwise allow set/update.
 	if user.PasswordHash.Valid && user.PasswordHash.String != "" {
 		currentPassword = strings.TrimSpace(currentPassword)
-		if currentPassword == "" {
-			return fmt.Errorf("current_password_required")
-		}
-		if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash.String), []byte(currentPassword)) != nil {
-			return fmt.Errorf("invalid_current_password")
+		if currentPassword != "" {
+			if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash.String), []byte(currentPassword)) != nil {
+				return fmt.Errorf("invalid_current_password")
+			}
 		}
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
