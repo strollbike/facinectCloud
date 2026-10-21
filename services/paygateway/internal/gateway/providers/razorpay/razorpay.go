@@ -276,9 +276,17 @@ func (p *Provider) Verify(ctx context.Context, req gateway.VerifyRequest) (*gate
 }
 
 func (p *Provider) ParseWebhook(headers http.Header, body []byte) (*gateway.NormalizedEvent, error) {
-	if p.WebhookSecret != "" {
+	return p.ParseWebhookSecret(headers, body, p.WebhookSecret)
+}
+
+func (p *Provider) ParseWebhookSecret(headers http.Header, body []byte, secret string) (*gateway.NormalizedEvent, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		secret = p.WebhookSecret
+	}
+	if secret != "" {
 		sig := headers.Get("X-Razorpay-Signature")
-		mac := hmac.New(sha256.New, []byte(p.WebhookSecret))
+		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write(body)
 		expected := hex.EncodeToString(mac.Sum(nil))
 		if !hmac.Equal([]byte(expected), []byte(sig)) {
@@ -304,6 +312,7 @@ func (p *Provider) ParseWebhook(headers http.Header, body []byte) (*gateway.Norm
 		Type:     normalizeRazorpayEvent(payload.Event),
 		Raw:      map[string]interface{}{"event": payload.Event},
 	}
+	ev.Purpose = purposeFromNotes(payload.Payload.Payment.Entity["notes"])
 	if id, ok := payload.Payload.Payment.Entity["id"].(string); ok {
 		ev.PaymentID = id
 	}
@@ -320,6 +329,20 @@ func (p *Provider) ParseWebhook(headers http.Header, body []byte) (*gateway.Norm
 		ev.Currency = cur
 	}
 	return ev, nil
+}
+
+func purposeFromNotes(raw interface{}) string {
+	notes, ok := raw.(map[string]interface{})
+	if !ok || notes == nil {
+		return ""
+	}
+	if v, ok := notes["purpose"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := notes["category"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
 }
 
 func normalizeRazorpayEvent(e string) string {

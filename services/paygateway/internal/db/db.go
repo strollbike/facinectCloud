@@ -54,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_gateway_orders_external
   ON gateway_orders(provider, external_order_id);
 CREATE INDEX IF NOT EXISTS idx_gateway_orders_receipt
   ON gateway_orders(receipt) WHERE receipt IS NOT NULL AND receipt <> '';
+ALTER TABLE gateway_orders ADD COLUMN IF NOT EXISTS payment_id VARCHAR(128) NULL;
 `)
 	return err
 }

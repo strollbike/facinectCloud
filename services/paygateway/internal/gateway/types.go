@@ -1,5 +1,7 @@
 package gateway
 
+import "net/http"
+
 // CreateRequest is the stable caller contract (saas-billing / booking).
 // AmountPaise is the canonical unit (Razorpay-style); rupees callers may send Amount.
 type CreateRequest struct {
@@ -10,9 +12,10 @@ type CreateRequest struct {
 	Receipt   string                 `json:"receipt"`
 	Customer  Customer               `json:"customer"`
 	Metadata  map[string]interface{} `json:"metadata"`
-	ReturnURL string                 `json:"return_url"`
+	ReturnURL  string                 `json:"return_url"`
 	FacilityID *int64                `json:"facility_id"`
-	Purpose   string                 `json:"purpose"`
+	Purpose    string                 `json:"purpose"`
+	Notes      map[string]interface{} `json:"notes"`
 }
 
 type Customer struct {
@@ -78,7 +81,28 @@ type NormalizedEvent struct {
 	PaymentID       string                 `json:"payment_id,omitempty"`
 	AmountPaise     int64                  `json:"amount_paise,omitempty"`
 	Currency        string                 `json:"currency,omitempty"`
+	Purpose         string                 `json:"purpose,omitempty"`
 	Raw             map[string]interface{} `json:"raw,omitempty"`
+}
+
+// WebhookResult is the stable response for a channel webhook.
+// Ignored is still HTTP 200 so the provider does not retry the other channel.
+type WebhookResult struct {
+	Provider        string `json:"provider"`
+	Type            string `json:"type"`
+	ExternalOrderID string `json:"external_order_id,omitempty"`
+	PaymentID       string `json:"payment_id,omitempty"`
+	Purpose         string `json:"purpose,omitempty"`
+	Channel         string `json:"channel"`
+	Accepted        bool   `json:"accepted"`
+	Ignored         bool   `json:"ignored"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+// WebhookSecretParser lets one provider verify two webhook secrets
+// (customer payments vs facility subscription) without a second integration.
+type WebhookSecretParser interface {
+	ParseWebhookSecret(headers http.Header, body []byte, secret string) (*NormalizedEvent, error)
 }
 
 type ProviderInfo struct {

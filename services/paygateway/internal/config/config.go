@@ -18,10 +18,12 @@ type Config struct {
 	JWTPublicKeyPath      string
 	JWTIssuer             string
 	JWTAudience           string
-	DefaultProvider       string
-	RazorpayKeyID         string
-	RazorpayKeySecret     string
-	RazorpayWebhookSecret string
+	DefaultProvider              string
+	SubscriptionProvider         string
+	RazorpayKeyID                string
+	RazorpayKeySecret            string
+	RazorpayWebhookSecret        string
+	SubscriptionWebhookSecret    string
 }
 
 func FromEnv() Config {
@@ -38,10 +40,12 @@ func FromEnv() Config {
 		JWTPublicKeyPath:      getenv("JWT_PUBLIC_KEY_PATH", "/keys/jwt_public.pem"),
 		JWTIssuer:             getenv("JWT_ISSUER", "https://api.facinect.local"),
 		JWTAudience:           getenv("JWT_AUDIENCE", "facinect-apps"),
-		DefaultProvider:       strings.ToLower(getenv("GATEWAY_DEFAULT_PROVIDER", "razorpay")),
-		RazorpayKeyID:         strings.TrimSpace(os.Getenv("RAZORPAY_KEY_ID")),
-		RazorpayKeySecret:     strings.TrimSpace(os.Getenv("RAZORPAY_KEY_SECRET")),
-		RazorpayWebhookSecret: strings.TrimSpace(os.Getenv("RAZORPAY_WEBHOOK_SECRET")),
+		DefaultProvider:           strings.ToLower(getenv("GATEWAY_DEFAULT_PROVIDER", "razorpay")),
+		SubscriptionProvider:      strings.ToLower(getenv("SUBSCRIPTION_PROVIDER", "razorpay")),
+		RazorpayKeyID:             strings.TrimSpace(os.Getenv("RAZORPAY_KEY_ID")),
+		RazorpayKeySecret:         strings.TrimSpace(os.Getenv("RAZORPAY_KEY_SECRET")),
+		RazorpayWebhookSecret:     strings.TrimSpace(os.Getenv("RAZORPAY_WEBHOOK_SECRET")),
+		SubscriptionWebhookSecret: strings.TrimSpace(os.Getenv("RAZORPAY_SUBSCRIPTION_WEBHOOK_SECRET")),
 	}
 }
 

@@ -28,7 +28,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/gateway/payment-links/{linkId}/cancel", s.withAuth(s.handleCancelPaymentLink))
 	mux.HandleFunc("POST /v1/gateway/verify", s.withAuth(s.handleVerify))
 
-	// Webhooks: provider signature, no JWT
+	// Webhooks: provider signature, no JWT.
+	// subscription = facility plan. razorpay = booking, coaching, membership, tournament, fees.
+	// Both use Razorpay until SUBSCRIPTION_PROVIDER is changed.
+	mux.HandleFunc("GET /v1/gateway/webhooks/subscription", s.handleWebhookReady("subscription"))
+	mux.HandleFunc("POST /v1/gateway/webhooks/subscription", s.handleChannelWebhook("subscription"))
+	mux.HandleFunc("GET /v1/gateway/webhooks/razorpay", s.handleWebhookReady("razorpay"))
+	mux.HandleFunc("POST /v1/gateway/webhooks/razorpay", s.handleChannelWebhook("razorpay"))
 	mux.HandleFunc("POST /v1/gateway/webhooks/{provider}", s.handleWebhook)
 
 	return s.withCORS(mux)
@@ -189,6 +195,36 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request, _ *authCtx
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleWebhookReady(channel string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"ok":      "true",
+			"channel": channel,
+			"message": "Razorpay must POST the event JSON with X-Razorpay-Signature.",
+		})
+	}
+}
+
+func (s *Server) handleChannelWebhook(channel string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_body"})
+			return
+		}
+		ev, err := s.Gateway.HandleChannelWebhook(r.Context(), channel, "", r.Header, body)
+		if err != nil {
+			code := http.StatusBadRequest
+			if strings.Contains(err.Error(), "signature") {
+				code = http.StatusUnauthorized
+			}
+			writeJSON(w, code, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, ev)
+	}
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
