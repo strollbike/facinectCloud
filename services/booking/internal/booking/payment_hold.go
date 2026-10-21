@@ -51,6 +51,8 @@ type PaymentHold struct {
 	PaidAt         string  `json:"paid_at,omitempty"`
 	HoldMinutes    int     `json:"hold_minutes"`
 	BookingIDs     []int64 `json:"booking_ids,omitempty"`
+	// App / facility user created or updated from WhatsApp + name.
+	UserID int64 `json:"user_id,omitempty"`
 }
 
 func randomToken(n int) (string, error) {
@@ -186,7 +188,21 @@ SET payment_url=$2, provider_link_id=NULLIF($3,''), updated_at=NOW()
 WHERE id=$1`, id, linkURL, linkID)
 	}
 
-	return s.GetPaymentHold(ctx, facilityID, id)
+	// Auto upsert users table + facility-wise customer (name + WhatsApp).
+	userID, uerr := s.ensureFacilityAppUser(ctx, facilityID, wa, in.CustomerName)
+	if uerr != nil {
+		// Hold already created — surface user upsert failure without rolling back hold.
+		_ = uerr
+	}
+
+	h, err := s.GetPaymentHold(ctx, facilityID, id)
+	if err != nil {
+		return nil, err
+	}
+	if userID > 0 {
+		h.UserID = userID
+	}
+	return h, nil
 }
 
 func (s *Service) createGatewayPaymentLink(
@@ -318,6 +334,13 @@ func scanPaymentHold(row *sql.Row) (*PaymentHold, error) {
 	h.PayAmount = pay
 	h.SlotIDs = parsePgInt64Array(slotText)
 	h.HoldMinutes = int(paymentHoldTTL / time.Minute)
+	// Normalize absolute timestamps to UTC ISO-8601 for both apps.
+	if t := ParseHoldExpiresAt(h.ExpiresAt); !t.IsZero() {
+		h.ExpiresAt = t.UTC().Format(time.RFC3339)
+	}
+	if t := ParseHoldExpiresAt(h.PaidAt); !t.IsZero() {
+		h.PaidAt = t.UTC().Format(time.RFC3339)
+	}
 	return &h, nil
 }
 
@@ -366,6 +389,12 @@ func (s *Service) ConfirmPaymentHold(ctx context.Context, token string) (*Paymen
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Ensure customer exists facility-wise before writing bookings.
+	var userID interface{}
+	if uid, uerr := s.ensureFacilityAppUser(ctx, h.FacilityID, h.WhatsApp, h.CustomerName); uerr == nil && uid > 0 {
+		userID = uid
+	}
+
 	bookingIDs := make([]int64, 0, len(h.SlotIDs))
 	notes := strings.TrimSpace(h.Category)
 	if notes == "" {
@@ -385,10 +414,10 @@ SELECT status FROM booking_slots WHERE id=$1 AND facility_id=$2 FOR UPDATE`,
 		var bookingID int64
 		err = tx.QueryRowContext(ctx, `
 INSERT INTO booking_bookings (
-  facility_id, slot_id, customer_name, customer_phone, status, notes, payment_status, pay_mode, amount_paid
-) VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),'confirmed',NULLIF($5,''),'paid',$6,$7)
+  facility_id, slot_id, user_id, customer_name, customer_phone, status, notes, payment_status, pay_mode, amount_paid
+) VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),'confirmed',NULLIF($6,''),'paid',$7,$8)
 RETURNING id`,
-			h.FacilityID, sid, h.CustomerName, h.WhatsApp, notes, h.AmountType, h.PayAmount,
+			h.FacilityID, sid, userID, h.CustomerName, h.WhatsApp, notes, h.AmountType, h.PayAmount,
 		).Scan(&bookingID)
 		if err != nil {
 			return nil, err
@@ -408,6 +437,9 @@ UPDATE booking_payment_holds SET status='paid', paid_at=NOW(), updated_at=NOW() 
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+	for _, sid := range h.SlotIDs {
+		_ = s.syncAppSlotFromBookingSlot(ctx, sid)
 	}
 	out, err := s.GetPaymentHoldByToken(ctx, token)
 	if err != nil {

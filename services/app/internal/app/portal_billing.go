@@ -540,13 +540,16 @@ func (s *Service) billingSendPaymentReminder(ctx context.Context, body map[strin
 		months := strings.Join(a.months, ", ")
 		btn := fmt.Sprintf("?p=f%d", fid)
 		payload := map[string]any{
-			"channel":     "whatsapp",
+			"channel":     "both", // WhatsApp + push
 			"facility_id": fid,
 			"template":    "payment_reminder_dns",
 			"to":          map[string]any{"whatsapp": wa},
 			"data": map[string]any{
+				"title":            "Payment reminder",
+				"body":             fmt.Sprintf("Pending: %s · %s (%s)", names, amounts, months),
 				"body_params":      []string{names, amounts, months},
 				"button_url_param": btn,
+				"type":             "payment_reminder",
 			},
 		}
 		if err := s.postNotificationsSend(ctx, base, payload); err == nil {

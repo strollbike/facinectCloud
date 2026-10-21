@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,6 +20,14 @@ func bookingTZ() *time.Location {
 		return time.Local
 	}
 	return loc
+}
+
+// utcISO formats an absolute timestamp as UTC ISO-8601 (RFC3339 with Z).
+func utcISO(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 type bookingSlotMeta struct {
@@ -167,21 +176,105 @@ func bookingListItem(id, facilityID, sportID int64, fname, sportName, status str
 		rawUnix = start.Unix()
 	}
 	return map[string]any{
-		"bookingId":         strconv.FormatInt(id, 10),
-		"facilityId":        facilityID,
-		"facilityName":      fname,
-		"sportId":           sportID,
-		"sportName":         sportName,
-		"subFacilityNames":  courts,
-		"bookingTime":       start.Format(time.RFC3339),
-		"formatted_time":    ftime,
-		"formatted_date":    fdate,
-		"ui_day":            uiDay,
-		"ui_month":          uiMonth,
-		"ui_weekday":        uiWeekday,
-		"raw_timestamp":     rawUnix,
-		"status":            status,
+		"bookingId":        strconv.FormatInt(id, 10),
+		"facilityId":       facilityID,
+		"facilityName":     fname,
+		"sportId":          sportID,
+		"sportName":        sportName,
+		"subFacilityNames": courts,
+		"bookingTime":      utcISO(start),
+		"formatted_time":   ftime,
+		"formatted_date":   fdate,
+		"ui_day":           uiDay,
+		"ui_month":         uiMonth,
+		"ui_weekday":       uiWeekday,
+		"raw_timestamp":    rawUnix,
+		"status":           status,
 	}
+}
+
+// pendingPaymentHoldsForUser returns StrollX payment-link holds for this WhatsApp
+// (last-10 match) so proximity My Bookings can show Confirm & Pay.
+func (s *Service) pendingPaymentHoldsForUser(ctx context.Context, uid, facilityFilter int64, whatsappHint string) []map[string]any {
+	wa := normalizeWA(whatsappHint)
+	if wa == "" && uid > 0 {
+		if u, _ := s.userRow(ctx, uid, ""); u != nil {
+			wa = normalizeWA(fmt.Sprint(u["whatsappNo"]))
+			if wa == "" {
+				wa = normalizeWA(fmt.Sprint(u["phone"]))
+			}
+		}
+	}
+	last10 := last10Digits(wa)
+	if len(last10) < 10 {
+		return nil
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT h.id, h.facility_id, COALESCE(f.name,''), COALESCE(h.sport_name,''),
+       COALESCE(h.slots_summary,''), COALESCE(h.payment_url,''),
+       COALESCE(h.pay_amount,0), COALESCE(h.amount_type,'full'),
+       h.expires_at, h.created_at,
+       (SELECT MIN(s.slot_date) FROM booking_slots s WHERE s.id = ANY(h.slot_ids)),
+       (SELECT MIN(s.start_time) FROM booking_slots s WHERE s.id = ANY(h.slot_ids))
+FROM booking_payment_holds h
+LEFT JOIN app_facilities f ON f.id = h.facility_id
+WHERE h.status = 'pending'
+  AND h.expires_at > NOW()
+  AND RIGHT(regexp_replace(COALESCE(h.whatsapp,''), '\D', '', 'g'), 10) = $1
+  AND ($2 = 0 OR h.facility_id = $2)
+ORDER BY h.expires_at ASC`, last10, facilityFilter)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var holdID, facilityID int64
+		var fname, sportName, summary, payURL, amountType string
+		var payAmt float64
+		var expires, created time.Time
+		var slotDate sql.NullTime
+		var startTime sql.NullString
+		if rows.Scan(&holdID, &facilityID, &fname, &sportName, &summary, &payURL,
+			&payAmt, &amountType, &expires, &created, &slotDate, &startTime) != nil {
+			continue
+		}
+		if payURL == "" {
+			continue
+		}
+		start := created
+		if slotDate.Valid {
+			start = slotDate.Time
+			if startTime.Valid {
+				// Combine date + time in facility TZ when possible.
+				if t, err := time.Parse("15:04:05", strings.TrimSpace(startTime.String)); err == nil {
+					start = time.Date(start.Year(), start.Month(), start.Day(),
+						t.Hour(), t.Minute(), t.Second(), 0, bookingTZ())
+				} else if t, err := time.Parse("15:04", strings.TrimSpace(startTime.String)); err == nil {
+					start = time.Date(start.Year(), start.Month(), start.Day(),
+						t.Hour(), t.Minute(), 0, 0, bookingTZ())
+				}
+			}
+		}
+		courts := strings.TrimSpace(summary)
+		if courts == "" {
+			courts = "Held slot"
+		}
+		if sportName == "" {
+			sportName = "Booking"
+		}
+		item := bookingListItem(holdID, facilityID, 0, fname, sportName, "pending_payment", start, courts, "", "")
+		item["bookingId"] = fmt.Sprintf("H%d", holdID)
+		item["holdId"] = holdID
+		item["paymentUrl"] = payURL
+		item["expiresAt"] = utcISO(expires)
+		item["payAmount"] = payAmt
+		item["amountType"] = amountType
+		item["pendingPayment"] = true
+		item["confirmMessage"] = "Confirm your slot — please complete payment."
+		out = append(out, item)
+	}
+	return out
 }
 
 func (s *Service) releaseBookingSlots(ctx context.Context, facilityID, sportID int64, slotsJSON []byte) {

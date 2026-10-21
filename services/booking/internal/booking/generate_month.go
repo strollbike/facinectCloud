@@ -340,7 +340,8 @@ FROM booking_slots s
 JOIN booking_courts c ON c.id = s.court_id
 WHERE s.facility_id=$1
   AND s.slot_date BETWEEN $2::date AND $3::date
-ON CONFLICT (facility_id, sport_id, court_name, slot_date, time_range) DO NOTHING`,
+ON CONFLICT (facility_id, sport_id, court_name, slot_date, time_range) DO UPDATE
+SET status = EXCLUDED.status`,
 		facilityID, from.Format("2006-01-02"), to.Format("2006-01-02"))
 	return err
 }

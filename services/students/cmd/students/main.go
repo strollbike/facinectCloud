@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/facinect/students/internal/authn"
 	"github.com/facinect/students/internal/config"
@@ -35,6 +37,11 @@ func main() {
 	}
 
 	svc := &students.Service{DB: sqlDB, Cfg: cfg}
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	if err := svc.SyncAllCoachingBlocks(syncCtx); err != nil {
+		log.Printf("coaching active blocks: %v", err)
+	}
+	syncCancel()
 	srv := &httpapi.Server{Cfg: cfg, Students: svc, JWT: jwtVerifier}
 	log.Printf("students (go) listening on %s service_key=%v jwt=%v",
 		cfg.HTTPAddr, cfg.ServiceKey != "", jwtVerifier != nil)

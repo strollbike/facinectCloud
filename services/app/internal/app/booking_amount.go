@@ -118,7 +118,7 @@ func (s *Service) computeCheckoutAmounts(ctx context.Context, facilityID, sportI
 		price, adv, ok := matchSlotPrice(rows, k.court, day)
 		if !ok {
 			price = 500
-			adv = 100
+			adv = 1
 		}
 		total += price
 		scheduleAdv += adv

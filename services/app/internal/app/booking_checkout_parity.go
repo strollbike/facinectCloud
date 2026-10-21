@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"strconv"
@@ -66,7 +67,7 @@ WHERE facility_id=$1 AND UPPER(code)=$2 AND status='active'`, facilityID, upper)
 		return value, isReg, false, nil
 	}
 
-	// User refund / assigned coupons (REF-*).
+	// User refund / assigned coupons (REF-* / MEMBER from admin Coupon).
 	var amt float64
 	var exp *time.Time
 	uerr := s.DB.QueryRowContext(ctx, `
@@ -77,6 +78,21 @@ WHERE facility_id=$1 AND UPPER(coupon_code)=$2
 ORDER BY id DESC LIMIT 1`, facilityID, upper, userID).Scan(&amt, &exp)
 	if uerr == nil && amt > 0 {
 		return amt, isReg, true, nil
+	}
+
+	// Fallback: booking_coupons MEMBER rows (CreateCoupons PHP parity).
+	var bDisc float64
+	var bUID sql.NullInt64
+	berr := s.DB.QueryRowContext(ctx, `
+SELECT discount, user_id FROM booking_coupons
+WHERE facility_id=$1 AND UPPER(code)=$2 AND status='active'
+  AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
+  AND (user_id IS NULL OR $3=0 OR user_id=$3)
+ORDER BY id DESC LIMIT 1`, facilityID, upper, userID).Scan(&bDisc, &bUID)
+	if berr == nil && bDisc > 0 {
+		// Single-use member coupon — consume deletes app_user + marks booking_coupons used.
+		_ = bUID
+		return bDisc, isReg, true, nil
 	}
 
 	return 0, isReg, false, fmt.Errorf("Invalid coupon")
@@ -212,16 +228,19 @@ func (s *Service) consumeCheckoutCoupon(ctx context.Context, facilityID, userID 
 		_, _ = s.DB.ExecContext(ctx, `
 UPDATE app_coupons SET status='used' WHERE facility_id=$1 AND UPPER(code)=$2 AND status='active'`,
 			facilityID, code)
-		return
 	}
 	if q.IsUserRefund {
 		_, _ = s.DB.ExecContext(ctx, `
 DELETE FROM app_user_coupons
 WHERE facility_id=$1 AND UPPER(coupon_code)=$2 AND ($3=0 OR user_id=$3)`,
 			facilityID, code, userID)
-		return
+		// PHP CreateCoupon MEMBER lives in booking_coupons — mark used after redeem.
+		_, _ = s.DB.ExecContext(ctx, `
+UPDATE booking_coupons SET status='used'
+WHERE facility_id=$1 AND UPPER(code)=$2 AND status='active'`,
+			facilityID, code)
 	}
-	// Promo: leave active (multi-use) unless single-use seed; bump nothing for now.
+	// Promo: leave app_coupons active (multi-use).
 	_ = bookingID
 }
 

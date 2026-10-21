@@ -127,7 +127,32 @@ CREATE TABLE IF NOT EXISTS booking_coupons (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (facility_id, code)
 );
+ALTER TABLE booking_coupons ADD COLUMN IF NOT EXISTS user_id BIGINT NULL;
+ALTER TABLE booking_coupons ADD COLUMN IF NOT EXISTS valid_until DATE NULL;
+ALTER TABLE booking_coupons ADD COLUMN IF NOT EXISTS created_by BIGINT NULL;
 CREATE INDEX IF NOT EXISTS idx_booking_coupons_facility ON booking_coupons(facility_id);
+CREATE INDEX IF NOT EXISTS idx_booking_coupons_user ON booking_coupons(facility_id, user_id);
+
+-- Shared DB with app service — member coupons redeemable at checkout.
+CREATE TABLE IF NOT EXISTS app_user_coupons (
+  id            BIGSERIAL PRIMARY KEY,
+  user_id       BIGINT NOT NULL,
+  facility_id   BIGINT NOT NULL,
+  coupon_code   VARCHAR(64) NOT NULL,
+  amount        NUMERIC(12,2) NOT NULL DEFAULT 0,
+  expiry_date   DATE NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_app_user_coupons_lookup
+  ON app_user_coupons(facility_id, coupon_code);
+
+-- PHP facilities.monthly_usage / monthly_quota (remaining credits / cap).
+ALTER TABLE facilities ADD COLUMN IF NOT EXISTS monthly_usage INT NOT NULL DEFAULT 50;
+ALTER TABLE facilities ADD COLUMN IF NOT EXISTS monthly_quota INT NOT NULL DEFAULT 50;
+ALTER TABLE facilities ADD COLUMN IF NOT EXISTS last_reset_date TIMESTAMPTZ NULL;
+-- Fix bad caps only — never top up a legitimately exhausted monthly_usage=0.
+UPDATE facilities SET monthly_quota = 50 WHERE monthly_quota <= 0;
+UPDATE facilities SET monthly_usage = 0 WHERE monthly_usage < 0;
 
 CREATE TABLE IF NOT EXISTS booking_user_status (
   facility_id     BIGINT NOT NULL,
@@ -138,6 +163,35 @@ CREATE TABLE IF NOT EXISTS booking_user_status (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (facility_id, user_id)
 );
+
+-- PHP paid_users_{facilityId} parity — customers from payment-link / walk-in book.
+CREATE TABLE IF NOT EXISTS booking_facility_users (
+  facility_id   BIGINT NOT NULL,
+  user_id       BIGINT NOT NULL,
+  user_name     VARCHAR(191) NOT NULL DEFAULT '',
+  whatsapp_no   VARCHAR(32) NOT NULL DEFAULT '',
+  status        VARCHAR(16) NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active','blocked')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (facility_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_booking_facility_users_wa
+  ON booking_facility_users(facility_id, whatsapp_no);
+
+-- Ensure app_users exists (shared with app service) for payment-link upserts.
+CREATE TABLE IF NOT EXISTS app_users (
+  id                    BIGSERIAL PRIMARY KEY,
+  full_name             VARCHAR(191) NOT NULL DEFAULT '',
+  whatsapp_no           VARCHAR(32) NOT NULL UNIQUE,
+  phone                 VARCHAR(32) NOT NULL DEFAULT '',
+  email                 VARCHAR(191) NOT NULL DEFAULT '',
+  accessed_facility_ids BIGINT[] NOT NULL DEFAULT '{}',
+  status                VARCHAR(16) NOT NULL DEFAULT 'active',
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_app_users_wa ON app_users(whatsapp_no);
 
 CREATE TABLE IF NOT EXISTS booking_blocks (
   id              BIGSERIAL PRIMARY KEY,
@@ -174,6 +228,19 @@ CREATE TABLE IF NOT EXISTS booking_facility_schedule (
   close_hour      INT NOT NULL DEFAULT 22,
   slot_minutes    INT NOT NULL DEFAULT 60,
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Read by slot blocking so a coaching leave hour is not closed again.
+CREATE TABLE IF NOT EXISTS coaching_leaves (
+  id           BIGSERIAL PRIMARY KEY,
+  facility_id  BIGINT NOT NULL,
+  plan_id      BIGINT NOT NULL,
+  leave_date   DATE NOT NULL,
+  note         TEXT NOT NULL,
+  created_by   BIGINT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (facility_id, plan_id, leave_date)
 );
 `)
 	if err != nil {

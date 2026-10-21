@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,21 +18,23 @@ type Service struct {
 }
 
 type StudentRow struct {
-	EnrollmentID int64    `json:"enrollment_id"`
-	StudentID    int64    `json:"student_id"`
-	FacilityID   int64    `json:"facility_id"`
-	FirstName    string   `json:"first_name"`
-	LastName     string   `json:"last_name"`
-	Email        string   `json:"contact_email,omitempty"`
-	Phone        string   `json:"contact_phone,omitempty"`
-	WhatsApp     string   `json:"whatsapp,omitempty"`
-	SportID      *int64   `json:"sport_id,omitempty"`
-	PlanName     string   `json:"plan_name,omitempty"`
-	StartDate    string   `json:"start_date,omitempty"`
-	EndDate      string   `json:"end_date,omitempty"`
-	ActualFee    *float64 `json:"actual_fee,omitempty"`
-	Status       string   `json:"status"`
-	CreatedAt    string   `json:"created_at,omitempty"`
+	EnrollmentID  int64    `json:"enrollment_id"`
+	StudentID     int64    `json:"student_id"`
+	FacilityID    int64    `json:"facility_id"`
+	FirstName     string   `json:"first_name"`
+	LastName      string   `json:"last_name"`
+	Email         string   `json:"contact_email,omitempty"`
+	Phone         string   `json:"contact_phone,omitempty"`
+	WhatsApp      string   `json:"whatsapp,omitempty"`
+	SportID       *int64   `json:"sport_id,omitempty"`
+	PlanName      string   `json:"plan_name,omitempty"`
+	StartDate     string   `json:"start_date,omitempty"`
+	EndDate       string   `json:"end_date,omitempty"`
+	ActualFee     *float64 `json:"actual_fee,omitempty"`
+	Status        string   `json:"status"`
+	PaymentStatus string   `json:"payment_status"`
+	UnpaidCount   int      `json:"unpaid_count"`
+	CreatedAt     string   `json:"created_at,omitempty"`
 }
 
 type AttendanceRow struct {
@@ -66,6 +70,7 @@ type MarkAttendanceInput struct {
 	Status       string `json:"status"`
 	Notes        string `json:"notes"`
 	MarkedBy     *int64 `json:"marked_by"`
+	Role         string `json:"-"` // JWT role from HTTP layer
 }
 
 type UpdateStatusInput struct {
@@ -94,6 +99,9 @@ type PlanRow struct {
 	TotalFee    float64 `json:"total_fee"`
 	DaysPerWeek int     `json:"days_per_week"`
 	Description string  `json:"description,omitempty"`
+	StartTime    string `json:"start_time,omitempty"` // HH:mm
+	EndTime      string `json:"end_time,omitempty"`   // HH:mm
+	CoachingDays string `json:"coaching_days,omitempty"` // "1,3,5" Mon=1 … Sun=7
 }
 
 type CreatePlanInput struct {
@@ -101,6 +109,20 @@ type CreatePlanInput struct {
 	TotalFee    float64
 	DaysPerWeek int
 	Description string
+	StartTime    string // HH:mm
+	EndTime      string // HH:mm
+	CoachingDays string // "1,3,5"
+}
+
+// UpdateCoachingPlanInput edits a catalog batch (student_coaching_plans).
+type UpdateCoachingPlanInput struct {
+	PlanName    string
+	TotalFee    *float64
+	DaysPerWeek *int
+	Description *string
+	StartTime    *string
+	EndTime      *string
+	CoachingDays *string
 }
 
 func (s *Service) ListStudents(ctx context.Context, facilityID int64, sportID *int64, status string) ([]StudentRow, error) {
@@ -112,7 +134,40 @@ SELECT e.id, s.id, e.facility_id, s.first_name, s.last_name,
        COALESCE(s.contact_email,''), COALESCE(s.contact_phone,''), COALESCE(s.whatsapp,''),
        e.sport_id, COALESCE(e.plan_name,''),
        COALESCE(e.start_date::text,''), COALESCE(e.end_date::text,''), e.actual_fee,
-       e.status, e.created_at::text
+       e.status,
+       COALESCE((
+         SELECT CASE
+           WHEN EXISTS (
+             SELECT 1 FROM fee_bills b
+             WHERE b.facility_id = e.facility_id
+               AND LOWER(COALESCE(b.bill_type,'')) = 'student'
+               AND b.enrollment_id = e.id
+               AND NOT (
+                 LOWER(COALESCE(b.payment_status,'')) = 'paid'
+                 OR (COALESCE(b.bill_amount,0) > 0 AND COALESCE(b.paid_amount,0) >= COALESCE(b.bill_amount,0))
+               )
+           ) THEN 'unpaid'
+           WHEN EXISTS (
+             SELECT 1 FROM fee_bills b
+             WHERE b.facility_id = e.facility_id
+               AND LOWER(COALESCE(b.bill_type,'')) = 'student'
+               AND b.enrollment_id = e.id
+           ) THEN 'paid'
+           WHEN COALESCE(e.actual_fee,0) > 0 THEN 'unpaid'
+           ELSE 'n/a'
+         END
+       ), 'n/a') AS payment_status,
+       COALESCE((
+         SELECT COUNT(*)::int FROM fee_bills b
+         WHERE b.facility_id = e.facility_id
+           AND LOWER(COALESCE(b.bill_type,'')) = 'student'
+           AND b.enrollment_id = e.id
+           AND NOT (
+             LOWER(COALESCE(b.payment_status,'')) = 'paid'
+             OR (COALESCE(b.bill_amount,0) > 0 AND COALESCE(b.paid_amount,0) >= COALESCE(b.bill_amount,0))
+           )
+       ), CASE WHEN COALESCE(e.actual_fee,0) > 0 THEN 1 ELSE 0 END) AS unpaid_count,
+       e.created_at::text
 FROM student_enrollments e
 JOIN students s ON s.id = e.student_id
 WHERE e.facility_id=$1`
@@ -143,7 +198,7 @@ WHERE e.facility_id=$1`
 		if err := rows.Scan(
 			&r.EnrollmentID, &r.StudentID, &r.FacilityID, &r.FirstName, &r.LastName,
 			&r.Email, &r.Phone, &r.WhatsApp, &sport, &r.PlanName,
-			&r.StartDate, &r.EndDate, &fee, &r.Status, &r.CreatedAt,
+			&r.StartDate, &r.EndDate, &fee, &r.Status, &r.PaymentStatus, &r.UnpaidCount, &r.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -154,6 +209,12 @@ WHERE e.facility_id=$1`
 		if fee.Valid {
 			v := fee.Float64
 			r.ActualFee = &v
+		}
+		if r.PaymentStatus == "" {
+			r.PaymentStatus = "n/a"
+		}
+		if r.PaymentStatus == "unpaid" && r.UnpaidCount <= 0 {
+			r.UnpaidCount = 1
 		}
 		out = append(out, r)
 	}
@@ -330,6 +391,15 @@ func (s *Service) MarkAttendance(ctx context.Context, facilityID int64, in MarkA
 	}
 	if err := validateDate(in.Date); err != nil {
 		return nil, err
+	}
+	actorID := int64(0)
+	if in.MarkedBy != nil {
+		actorID = *in.MarkedBy
+	}
+	if actorID > 0 {
+		if err := s.EnsureCanEditStudentAttendance(ctx, facilityID, actorID, in.Role, in.Date); err != nil {
+			return nil, err
+		}
 	}
 
 	var enrFacility int64
@@ -544,6 +614,15 @@ func (s *Service) ListPlans(ctx context.Context, facilityID int64) ([]PlanRow, e
 			if p.Description != "" && cur.Description == "" {
 				cur.Description = p.Description
 			}
+			if p.StartTime != "" && cur.StartTime == "" {
+				cur.StartTime = p.StartTime
+			}
+			if p.EndTime != "" && cur.EndTime == "" {
+				cur.EndTime = p.EndTime
+			}
+			if p.CoachingDays != "" && cur.CoachingDays == "" {
+				cur.CoachingDays = p.CoachingDays
+			}
 			return
 		}
 		cp := p
@@ -553,6 +632,7 @@ func (s *Service) ListPlans(ctx context.Context, facilityID int64) ([]PlanRow, e
 
 	catRows, err := s.DB.QueryContext(ctx, `
 SELECT id, name, COALESCE(total_fee,0), COALESCE(days_per_week,0), COALESCE(description,''),
+  COALESCE(start_time,''), COALESCE(end_time,''), COALESCE(coaching_days,''),
   (SELECT COUNT(*)::int FROM student_enrollments e
    WHERE e.facility_id=$1 AND LOWER(TRIM(COALESCE(e.plan_name,''))) = LOWER(TRIM(p.name)))
 FROM student_coaching_plans p
@@ -562,13 +642,27 @@ ORDER BY p.name`, facilityID)
 		defer catRows.Close()
 		for catRows.Next() {
 			var p PlanRow
-			if err := catRows.Scan(&p.PlanID, &p.PlanName, &p.TotalFee, &p.DaysPerWeek, &p.Description, &p.Count); err != nil {
+			if err := catRows.Scan(&p.PlanID, &p.PlanName, &p.TotalFee, &p.DaysPerWeek, &p.Description, &p.StartTime, &p.EndTime, &p.CoachingDays, &p.Count); err != nil {
 				return nil, err
 			}
 			add(p)
 		}
 		if err := catRows.Err(); err != nil {
 			return nil, err
+		}
+	}
+
+	// Soft-removed batches stay in DB (status=inactive) — never resurface from enrollments.
+	inactive := map[string]struct{}{}
+	if invRows, invErr := s.DB.QueryContext(ctx, `
+SELECT LOWER(TRIM(name)) FROM student_coaching_plans
+WHERE facility_id=$1 AND status='inactive'`, facilityID); invErr == nil {
+		defer invRows.Close()
+		for invRows.Next() {
+			var key string
+			if err := invRows.Scan(&key); err == nil && key != "" {
+				inactive[key] = struct{}{}
+			}
 		}
 	}
 
@@ -586,6 +680,14 @@ ORDER BY 1`, facilityID)
 		var p PlanRow
 		if err := enrRows.Scan(&p.PlanName, &p.Count); err != nil {
 			return nil, err
+		}
+		key := strings.ToLower(strings.TrimSpace(p.PlanName))
+		if _, gone := inactive[key]; gone {
+			continue
+		}
+		// Placeholder for unassigned enrollments — not a real batch to manage.
+		if key == "(no batch)" || key == "" {
+			continue
 		}
 		add(p)
 	}
@@ -620,22 +722,41 @@ func (s *Service) CreatePlan(ctx context.Context, facilityID int64, in CreatePla
 	}
 	desc := strings.TrimSpace(in.Description)
 
+	coachingDays, daysFromCal, errDays := normalizeCoachingDays(in.CoachingDays)
+	if errDays != nil {
+		return nil, errDays
+	}
+	if daysFromCal > 0 {
+		days = daysFromCal
+	}
+	startTime := strings.TrimSpace(in.StartTime)
+	endTime := strings.TrimSpace(in.EndTime)
+	if startTime != "" && !batchTimeRe.MatchString(startTime) {
+		return nil, fmt.Errorf("invalid_start_time")
+	}
+	if endTime != "" && !batchTimeRe.MatchString(endTime) {
+		return nil, fmt.Errorf("invalid_end_time")
+	}
+
 	var id int64
 	var fee float64
 	var daysOut int
-	var descOut string
+	var descOut, startOut, endOut, daysCalOut string
 	err := s.DB.QueryRowContext(ctx, `
-INSERT INTO student_coaching_plans (facility_id, name, total_fee, days_per_week, description, status)
-VALUES ($1,$2,$3,$4,$5,'active')
+INSERT INTO student_coaching_plans (facility_id, name, total_fee, days_per_week, description, start_time, end_time, coaching_days, status)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active')
 ON CONFLICT (facility_id, name) DO UPDATE SET
   total_fee = EXCLUDED.total_fee,
   days_per_week = EXCLUDED.days_per_week,
   description = CASE WHEN EXCLUDED.description <> '' THEN EXCLUDED.description ELSE student_coaching_plans.description END,
+  start_time = CASE WHEN EXCLUDED.start_time <> '' THEN EXCLUDED.start_time ELSE student_coaching_plans.start_time END,
+  end_time = CASE WHEN EXCLUDED.end_time <> '' THEN EXCLUDED.end_time ELSE student_coaching_plans.end_time END,
+  coaching_days = CASE WHEN EXCLUDED.coaching_days <> '' THEN EXCLUDED.coaching_days ELSE student_coaching_plans.coaching_days END,
   status = 'active',
   updated_at = NOW()
-RETURNING id, total_fee, days_per_week, COALESCE(description,'')`,
-		facilityID, name, in.TotalFee, days, desc,
-	).Scan(&id, &fee, &daysOut, &descOut)
+RETURNING id, total_fee, days_per_week, COALESCE(description,''), COALESCE(start_time,''), COALESCE(end_time,''), COALESCE(coaching_days,'')`,
+		facilityID, name, in.TotalFee, days, desc, startTime, endTime, coachingDays,
+	).Scan(&id, &fee, &daysOut, &descOut, &startOut, &endOut, &daysCalOut)
 	if err != nil {
 		return nil, err
 	}
@@ -646,10 +767,170 @@ SELECT COUNT(*) FROM student_enrollments
 WHERE facility_id=$1 AND LOWER(TRIM(COALESCE(plan_name,''))) = LOWER($2)`,
 		facilityID, name).Scan(&count)
 
-	return &PlanRow{
+	row := &PlanRow{
 		PlanID: id, PlanName: name, Count: count,
 		TotalFee: fee, DaysPerWeek: daysOut, Description: descOut,
-	}, nil
+		StartTime: startOut, EndTime: endOut, CoachingDays: daysCalOut,
+	}
+	s.syncCoachingActiveBlock(ctx, facilityID, name, row)
+	return row, nil
+}
+
+// normalizeCoachingDays keeps weekday numbers 1=Mon … 7=Sun, comma-separated.
+func normalizeCoachingDays(raw string) (string, int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", 0, nil
+	}
+	seen := map[int]struct{}{}
+	var days []int
+	for _, part := range strings.Split(raw, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || n < 1 || n > 7 {
+			return "", 0, fmt.Errorf("invalid_coaching_days")
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		days = append(days, n)
+	}
+	sort.Ints(days)
+	out := make([]string, len(days))
+	for i, n := range days {
+		out[i] = strconv.Itoa(n)
+	}
+	return strings.Join(out, ","), len(days), nil
+}
+
+// UpdateCoachingPlan updates an active batch. Renames also sync enrollment plan_name.
+// Does not delete data.
+func (s *Service) UpdateCoachingPlan(ctx context.Context, facilityID, planID int64, in UpdateCoachingPlanInput) (*PlanRow, error) {
+	if facilityID <= 0 || planID <= 0 {
+		return nil, fmt.Errorf("invalid_plan")
+	}
+	var oldName string
+	err := s.DB.QueryRowContext(ctx, `
+SELECT name FROM student_coaching_plans
+WHERE id=$1 AND facility_id=$2 AND status='active'`, planID, facilityID).Scan(&oldName)
+	if err != nil {
+		return nil, fmt.Errorf("plan_not_found")
+	}
+
+	newName := strings.TrimSpace(in.PlanName)
+	if newName == "" {
+		newName = oldName
+	}
+	if in.StartTime != nil {
+		t := strings.TrimSpace(*in.StartTime)
+		if t != "" && !batchTimeRe.MatchString(t) {
+			return nil, fmt.Errorf("invalid_start_time")
+		}
+	}
+	if in.EndTime != nil {
+		t := strings.TrimSpace(*in.EndTime)
+		if t != "" && !batchTimeRe.MatchString(t) {
+			return nil, fmt.Errorf("invalid_end_time")
+		}
+	}
+	if in.DaysPerWeek != nil {
+		d := *in.DaysPerWeek
+		if d < 0 {
+			d = 0
+		}
+		if d > 7 {
+			d = 7
+		}
+		in.DaysPerWeek = &d
+	}
+	var coachingDays *string
+	if in.CoachingDays != nil {
+		norm, n, errDays := normalizeCoachingDays(*in.CoachingDays)
+		if errDays != nil {
+			return nil, errDays
+		}
+		coachingDays = &norm
+		if n > 0 {
+			in.DaysPerWeek = &n
+		}
+	}
+
+	_, err = s.DB.ExecContext(ctx, `
+UPDATE student_coaching_plans SET
+  name = $3,
+  total_fee = COALESCE($4, total_fee),
+  days_per_week = COALESCE($5, days_per_week),
+  description = COALESCE($6, description),
+  start_time = COALESCE($7, start_time),
+  end_time = COALESCE($8, end_time),
+  coaching_days = COALESCE($9, coaching_days),
+  updated_at = NOW()
+WHERE id=$1 AND facility_id=$2 AND status='active'`,
+		planID, facilityID, newName,
+		in.TotalFee, in.DaysPerWeek, in.Description, in.StartTime, in.EndTime, coachingDays,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if !strings.EqualFold(strings.TrimSpace(oldName), newName) {
+		_, _ = s.DB.ExecContext(ctx, `
+UPDATE student_enrollments SET plan_name=$3, updated_at=NOW()
+WHERE facility_id=$1 AND LOWER(TRIM(COALESCE(plan_name,''))) = LOWER(TRIM($2))`,
+			facilityID, oldName, newName)
+	}
+
+	list, err := s.ListPlans(ctx, facilityID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].PlanID == planID || strings.EqualFold(list[i].PlanName, newName) {
+			s.syncCoachingActiveBlock(ctx, facilityID, oldName, &list[i])
+			return &list[i], nil
+		}
+	}
+	row := &PlanRow{PlanID: planID, PlanName: newName}
+	s.syncCoachingActiveBlock(ctx, facilityID, oldName, row)
+	return row, nil
+}
+
+// SoftDeleteCoachingPlan hides a batch (status=inactive). Enrollments and plan row stay in DB.
+// planName is used when planID is missing/synthetic so enrollment-only batches can be hidden too.
+func (s *Service) SoftDeleteCoachingPlan(ctx context.Context, facilityID, planID int64, planName string) error {
+	if facilityID <= 0 {
+		return fmt.Errorf("invalid_plan")
+	}
+	if planID > 0 {
+		var removed string
+		err := s.DB.QueryRowContext(ctx, `
+UPDATE student_coaching_plans
+SET status='inactive', updated_at=NOW()
+WHERE id=$1 AND facility_id=$2 AND status='active'
+RETURNING name`, planID, facilityID).Scan(&removed)
+		if err == nil {
+			s.removeCoachingActiveBlock(ctx, facilityID, removed)
+			return nil
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+	}
+	name := strings.TrimSpace(planName)
+	if name == "" || strings.EqualFold(name, "(No batch)") {
+		return fmt.Errorf("plan_not_found")
+	}
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO student_coaching_plans (facility_id, name, status)
+VALUES ($1,$2,'inactive')
+ON CONFLICT (facility_id, name) DO UPDATE SET
+  status='inactive',
+  updated_at=NOW()`, facilityID, name)
+	if err != nil {
+		return err
+	}
+	s.removeCoachingActiveBlock(ctx, facilityID, name)
+	return nil
 }
 
 func validateDate(date string) error {

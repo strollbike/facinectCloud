@@ -149,6 +149,11 @@ func (s *Server) handleFacilitiesNearby(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetSlots(w http.ResponseWriter, r *http.Request) {
 	fid, _ := strconv.ParseInt(r.URL.Query().Get("facilityId"), 10, 64)
 	sid, _ := strconv.ParseInt(r.URL.Query().Get("sportId"), 10, 64)
+	uid, _ := strconv.ParseInt(r.URL.Query().Get("userId"), 10, 64)
+	wa := strings.TrimSpace(r.URL.Query().Get("whatsappNo"))
+	if wa == "" {
+		wa = strings.TrimSpace(r.URL.Query().Get("whatsapp"))
+	}
 	date := r.URL.Query().Get("date")
 	if r.Method == http.MethodPost {
 		body, _ := s.readBody(r)
@@ -158,11 +163,19 @@ func (s *Server) handleGetSlots(w http.ResponseWriter, r *http.Request) {
 		if v, _ := strconv.ParseInt(fmt.Sprint(body["sportId"]), 10, 64); v > 0 {
 			sid = v
 		}
+		if v, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64); v > 0 {
+			uid = v
+		}
 		if d := strings.TrimSpace(fmt.Sprint(body["date"])); d != "" && d != "<nil>" {
 			date = d
 		}
+		if w := strings.TrimSpace(fmt.Sprint(body["whatsappNo"])); w != "" && w != "<nil>" {
+			wa = w
+		} else if w := strings.TrimSpace(fmt.Sprint(body["whatsapp"])); w != "" && w != "<nil>" {
+			wa = w
+		}
 	}
-	ok, msg, data := s.App.GetSlots(r.Context(), fid, sid, date)
+	ok, msg, data := s.App.GetSlots(r.Context(), fid, sid, uid, date, wa)
 	phpOK(w, ok, msg, data, 0)
 }
 

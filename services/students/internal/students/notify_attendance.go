@@ -358,12 +358,15 @@ func (s *Service) notifyStudentRegistrationConfirmation(ctx context.Context, row
 		return
 	}
 	payload := map[string]interface{}{
-		"channel":     "whatsapp",
+		"channel":     "both", // WhatsApp + push
 		"facility_id": row.FacilityID,
 		"template":    "member_registration_confirmation",
 		"to":          map[string]string{"whatsapp": phone},
 		"data": map[string]interface{}{
+			"title":       "Welcome to " + facilityName,
+			"body":        fmt.Sprintf("Hi %s, your %s enrollment is confirmed.", name, plan),
 			"body_params": []string{name, plan, roleName, benefit, facilityName, displayPhone},
+			"type":        "student_registration",
 		},
 	}
 	raw, _ := json.Marshal(payload)

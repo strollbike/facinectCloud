@@ -45,15 +45,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/booking/facilities/{facilityId}/blocks/{blockId}/dates", s.withAuth(s.handleBlockRuleDates))
 	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/blocks/{blockId}/free-range", s.withAuth(s.handleFreeBlockRuleRange))
 	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/blocks/free-by-reason", s.withAuth(s.handleFreeBlocksByReason))
+	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/blocks/conflicts", s.withAuth(s.handleBlockConflicts))
 	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/blocks/recurrence", s.withAuth(s.handleRecurrenceBlocks))
 	mux.HandleFunc("POST /v1/booking/bookings/{bookingId}/collect", s.withAuth(s.handleCollectPayment))
 	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/coupons", s.withAuth(s.handleCreateCoupons))
+	mux.HandleFunc("GET /v1/booking/facilities/{facilityId}/message-quota", s.withAuth(s.handleGetMessageQuota))
+	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/message-quota/consume", s.withAuth(s.handleConsumeMessageQuota))
 	mux.HandleFunc("POST /v1/booking/users/{userId}/status", s.withAuth(s.handleUserStatus))
 	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/users/{userId}/status", s.withAuth(s.handleFacilityUserStatus))
 
 	// Optional payment-link booking: hold 30 min → pay → auto book.
 	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/payment-holds", s.withAuth(s.handleCreatePaymentHold))
 	mux.HandleFunc("POST /v1/booking/facilities/{facilityId}/payment-holds/{holdId}/confirm", s.withAuth(s.handleConfirmPaymentHoldByID))
+	mux.HandleFunc("GET /v1/booking/facilities/{facilityId}/customers/lookup", s.withAuth(s.handleLookupFacilityCustomer))
 	mux.HandleFunc("GET /v1/booking/pay/{token}", s.handlePayPage)          // public
 	mux.HandleFunc("POST /v1/booking/pay/{token}/confirm", s.handlePayConfirm) // public (stub pay / webhook-style)
 
@@ -612,6 +616,29 @@ func (s *Server) handleFreeBlocksByReason(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "unblocked": n})
 }
 
+func (s *Server) handleBlockConflicts(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, err := pathInt(r, "facilityId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_facility_id"})
+		return
+	}
+	if err := s.requireFacility(ac, fid); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	var in booking.RecurrenceBlockInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	list, err := s.Book.PreviewBlockConflicts(r.Context(), fid, in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"conflicts": list})
+}
+
 func (s *Server) handleRecurrenceBlocks(w http.ResponseWriter, r *http.Request, ac *authCtx) {
 	fid, err := pathInt(r, "facilityId")
 	if err != nil {
@@ -686,6 +713,65 @@ func (s *Server) handleCreateCoupons(w http.ResponseWriter, r *http.Request, ac 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "coupons": list})
 }
 
+func (s *Server) handleGetMessageQuota(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, err := pathInt(r, "facilityId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_facility_id"})
+		return
+	}
+	if err := s.requireFacility(ac, fid); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	q, err := s.Book.GetMessageQuota(r.Context(), fid)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"quota": map[string]int{
+			"monthly_usage": q.MonthlyUsage,
+			"monthly_quota": q.MonthlyQuota,
+		},
+	})
+}
+
+func (s *Server) handleConsumeMessageQuota(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, err := pathInt(r, "facilityId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_facility_id"})
+		return
+	}
+	if err := s.requireFacility(ac, fid); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	var body struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	if body.Count <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count_required"})
+		return
+	}
+	q, err := s.Book.ConsumeMessageQuota(r.Context(), fid, body.Count)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"quota": map[string]int{
+			"monthly_usage": q.MonthlyUsage,
+			"monthly_quota": q.MonthlyQuota,
+		},
+	})
+}
+
 func (s *Server) handleUserStatus(w http.ResponseWriter, r *http.Request, ac *authCtx) {
 	uid, err := pathInt(r, "userId")
 	if err != nil {
@@ -740,6 +826,28 @@ func (s *Server) handleFacilityUserStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "user_id": uid, "status": in.Status})
+}
+
+func (s *Server) handleLookupFacilityCustomer(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, err := pathInt(r, "facilityId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_facility_id"})
+		return
+	}
+	if err := s.requireFacility(ac, fid); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	wa := strings.TrimSpace(r.URL.Query().Get("whatsapp"))
+	if wa == "" {
+		wa = strings.TrimSpace(r.URL.Query().Get("whatsappNo"))
+	}
+	out, err := s.Book.LookupFacilityCustomer(r.Context(), fid, wa)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "customer": out})
 }
 
 func (s *Server) handleCreatePaymentHold(w http.ResponseWriter, r *http.Request, ac *authCtx) {

@@ -301,11 +301,15 @@ FROM app_facilities f WHERE f.status='active'`)
 			var custOK, maint bool
 			_ = rows.Scan(&id, &name, &loc, &city, &logo, &flat, &flon, &ghash, &ghash5, &custOK, &maint)
 			dist := 0.0
-			if lat != 0 || lon != 0 {
+			missingCoords := flat == 0 && flon == 0
+			if !missingCoords && (lat != 0 || lon != 0) {
 				dist = haversineKm(lat, lon, flat, flon)
 				if dist > radius {
 					continue
 				}
+			} else if missingCoords {
+				// Still list facilities without map pins (admin onboarded, coords unset).
+				dist = 9999
 			}
 			if q != "" {
 				ql := strings.ToLower(q)
@@ -341,7 +345,7 @@ FROM app_facilities f WHERE f.status='active'`)
 				"longitude":                 flon,
 				"geohash":                   ghash,
 				"geohash5":                  ghash5,
-				"distanceKm":                math.Round(dist*10) / 10,
+				"distanceKm":                math.Round(dist*1000) / 1000, // metre precision
 				"sports":                    sports,
 				"customer_services_enabled": custOK,
 				"maintenance":               maint,
@@ -418,7 +422,7 @@ FROM app_facilities f WHERE f.status='active'`)
 			"longitude":                 flon,
 			"geohash":                   ghash,
 			"geohash5":                  ghash5,
-			"distanceKm":                math.Round(dist*10) / 10,
+			"distanceKm":                math.Round(dist*1000) / 1000, // metre precision
 			"sports":                    sports,
 			"customer_services_enabled": custOK,
 			"maintenance":               maint,
@@ -555,21 +559,61 @@ SELECT city_id, id, name, latitude, longitude FROM app_areas ORDER BY city_id, n
 	return true, "OK", map[string]any{"cities": cities, "geoCitiesReady": true}
 }
 
-func (s *Service) GetSlots(ctx context.Context, facilityID, sportID int64, date string) (bool, string, any) {
+func (s *Service) GetSlots(ctx context.Context, facilityID, sportID, userID int64, date, whatsappNo string) (bool, string, any) {
 	if date == "" {
 		date = time.Now().Format("2006-01-02")
 	}
 	if facilityID <= 0 || sportID <= 0 {
 		return false, "facilityId and sportId are required.", nil
 	}
+	// Resolve OTP login user from WhatsApp when userId omitted.
+	if userID <= 0 {
+		userID = s.resolveUserIDFromWhatsApp(ctx, whatsappNo)
+	}
 	s.releaseExpiredHolds(ctx, facilityID)
-	s.ensureSlotsForDay(ctx, facilityID, sportID, date)
+
+	// Prefer staff booking_slots (StrollX) so inventory matches admin.
+	list, fromBooking := s.slotsFromBookingInventory(ctx, facilityID, sportID, date)
+	if !fromBooking {
+		s.ensureSlotsForDay(ctx, facilityID, sportID, date)
+		list = s.slotsFromAppTable(ctx, facilityID, sportID, date)
+	} else {
+		// Overlay consumer OTP holds (app_slots onhold) onto staff inventory.
+		s.overlayAppHolds(ctx, facilityID, sportID, date, list)
+	}
+	_ = userID // held_by already on each row; client filters selectable with session userId
+	return true, "OK", list
+}
+
+func (s *Service) resolveUserIDFromWhatsApp(ctx context.Context, whatsappNo string) int64 {
+	wa := normalizeWA(whatsappNo)
+	if wa == "" {
+		return 0
+	}
+	u, err := s.userRow(ctx, 0, wa)
+	if err != nil || u == nil {
+		return 0
+	}
+	id, _ := strconv.ParseInt(fmt.Sprint(u["userId"]), 10, 64)
+	return id
+}
+
+// resolveCheckoutUserID prefers body userId; else WhatsApp OTP login user (app_users).
+func (s *Service) resolveCheckoutUserID(ctx context.Context, body map[string]any, uid int64) int64 {
+	if uid > 0 {
+		return uid
+	}
+	wa := s.resolvePortalWhatsApp(ctx, body)
+	return s.resolveUserIDFromWhatsApp(ctx, wa)
+}
+
+func (s *Service) slotsFromAppTable(ctx context.Context, facilityID, sportID int64, date string) []map[string]any {
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT facility_id, sport_id, court_name, slot_date::text, time_range, status, held_by_user_id
 FROM app_slots WHERE facility_id=$1 AND sport_id=$2 AND slot_date=$3::date
 ORDER BY court_name, time_range`, facilityID, sportID, date)
 	if err != nil {
-		return false, err.Error(), nil
+		return nil
 	}
 	defer rows.Close()
 	list := []map[string]any{}
@@ -589,7 +633,84 @@ ORDER BY court_name, time_range`, facilityID, sportID, date)
 		}
 		list = append(list, item)
 	}
-	return true, "OK", list
+	return list
+}
+
+// slotsFromBookingInventory mirrors StrollX booking_slots for the consumer app.
+func (s *Service) slotsFromBookingInventory(ctx context.Context, facilityID, sportID int64, date string) ([]map[string]any, bool) {
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT s.facility_id,
+       COALESCE(NULLIF(c.sport_id,0), $3) AS sport_id,
+       c.name,
+       s.slot_date::text,
+       to_char(s.start_time, 'HH24:MI') || '-' || to_char(s.end_time, 'HH24:MI'),
+       LOWER(s.status)
+FROM booking_slots s
+JOIN booking_courts c ON c.id = s.court_id
+WHERE s.facility_id=$1 AND s.slot_date=$2::date
+  AND ($3=0 OR c.sport_id IS NULL OR c.sport_id=0 OR c.sport_id=$3)
+ORDER BY c.name, s.start_time`, facilityID, date, sportID)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	list := []map[string]any{}
+	for rows.Next() {
+		var fid, sid int64
+		var court, d, tr, st string
+		if rows.Scan(&fid, &sid, &court, &d, &tr, &st) != nil {
+			continue
+		}
+		st = strings.ToLower(strings.TrimSpace(st))
+		// Consumer UI uses onhold; staff payment-hold uses held.
+		if st == "held" {
+			st = "onhold"
+		}
+		list = append(list, map[string]any{
+			"facilityId": fid, "sportId": sid, "courtName": court,
+			"date": d, "timeRange": tr, "status": st,
+			"held_by_userId": 0, "heldByUserId": 0,
+		})
+	}
+	return list, len(list) > 0
+}
+
+func (s *Service) overlayAppHolds(ctx context.Context, facilityID, sportID int64, date string, list []map[string]any) {
+	if len(list) == 0 {
+		return
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT court_name, time_range, COALESCE(held_by_user_id,0)
+FROM app_slots
+WHERE facility_id=$1 AND sport_id=$2 AND slot_date=$3::date
+  AND LOWER(status)='onhold'`, facilityID, sportID, date)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	holds := map[string]int64{}
+	for rows.Next() {
+		var court, tr string
+		var held int64
+		if rows.Scan(&court, &tr, &held) != nil {
+			continue
+		}
+		holds[strings.ToLower(court)+"|"+tr] = held
+	}
+	for _, item := range list {
+		court := strings.ToLower(fmt.Sprint(item["courtName"]))
+		tr := fmt.Sprint(item["timeRange"])
+		held, ok := holds[court+"|"+tr]
+		if !ok {
+			continue
+		}
+		st := strings.ToLower(fmt.Sprint(item["status"]))
+		if st == "available" || st == "onhold" {
+			item["status"] = "onhold"
+			item["held_by_userId"] = held
+			item["heldByUserId"] = held
+		}
+	}
 }
 
 func (s *Service) MarkBooked(ctx context.Context, body map[string]any) (bool, string, any) {
@@ -652,6 +773,8 @@ func (s *Service) BookingCheckout(ctx context.Context, body map[string]any) (boo
 	fid, _ := strconv.ParseInt(fmt.Sprint(body["facilityId"]), 10, 64)
 	sportID, _ := strconv.ParseInt(fmt.Sprint(body["sportId"]), 10, 64)
 	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
+	// All checkout mutations bind to WhatsApp OTP login user (app_users).
+	uid = s.resolveCheckoutUserID(ctx, body, uid)
 
 	var blocked bool
 	_ = s.DB.QueryRowContext(ctx, `SELECT booking_blocked FROM app_facilities WHERE id=$1`, fid).Scan(&blocked)
@@ -661,6 +784,9 @@ func (s *Service) BookingCheckout(ctx context.Context, body map[string]any) (boo
 
 	switch action {
 	case "set_slots_onhold":
+		if uid <= 0 {
+			return false, "Sign in with WhatsApp OTP to hold slots.", nil, 401
+		}
 		slots, _ := body["slots"].([]any)
 		if err := s.holdSlotsForUser(ctx, fid, sportID, uid, slots); err != nil {
 			return false, err.Error(), nil, 409
@@ -669,6 +795,9 @@ func (s *Service) BookingCheckout(ctx context.Context, body map[string]any) (boo
 			"facilityId": fid, "userId": uid, "holdMinutes": int(slotHoldTTL.Minutes()),
 		}, 200
 	case "release_hold":
+		if uid <= 0 {
+			return false, "Sign in with WhatsApp OTP to release holds.", nil, 401
+		}
 		slots, _ := body["slots"].([]any)
 		s.releaseUserHolds(ctx, fid, sportID, uid, slots)
 		return true, "Hold released.", map[string]any{"facilityId": fid, "userId": uid}, 200
@@ -681,7 +810,7 @@ WHERE facility_id=$1 AND sport_id=$2`, fid, sportID)
 		}
 		defer rows.Close()
 		plist := []map[string]any{}
-		adv := 100.0
+		adv := 1.0
 		for rows.Next() {
 			var court, day string
 			var price, advance float64
@@ -695,7 +824,7 @@ WHERE facility_id=$1 AND sport_id=$2`, fid, sportID)
 		}
 		if len(plist) == 0 {
 			plist = append(plist, map[string]any{
-				"subFacilityName": "Court 1", "dayType": "WEEKDAY", "price": 500, "advance_amount": 100,
+				"subFacilityName": "Court 1", "dayType": "WEEKDAY", "price": 500, "advance_amount": 1,
 			})
 		}
 		for i := range plist {
@@ -725,14 +854,14 @@ WHERE facility_id=$1 AND sport_id=$2`, fid, sportID)
 	case "quote":
 		slots, _ := body["slots"].([]any)
 		mode := fmt.Sprint(body["paymentMode"])
-		coupon := strings.TrimSpace(fmt.Sprint(body["couponCode"]))
+		coupon := strField(body, "couponCode")
 		q, qerr := s.buildCheckoutQuote(ctx, fid, sportID, uid, slots, mode, coupon)
 		if qerr != nil {
 			return false, qerr.Error(), nil, 400
 		}
 		return true, "OK", quoteToMap(q), 200
 	case "validate_coupon":
-		code := strings.TrimSpace(fmt.Sprint(body["couponCode"]))
+		code := strField(body, "couponCode")
 		if code == "" {
 			return false, "facilityId and couponCode are required.", nil, 400
 		}
@@ -741,17 +870,35 @@ WHERE facility_id=$1 AND sport_id=$2`, fid, sportID)
 			return false, "Invalid coupon", nil, 400
 		}
 		ctype := s.couponCType(ctx, fid, code)
+		source := "PROMO"
+		offerType := "PROMO"
 		if isUser {
 			ctype = "flat"
+			source = "COUPON"
+			offerType = "COUPON"
+			if strings.HasPrefix(strings.ToUpper(code), "REF-") {
+				offerType = "COUPON"
+			} else {
+				// Admin CreateCoupons MEMBER (booking_coupons / app_user_coupons).
+				source = "MEMBER"
+				offerType = "MEMBER"
+			}
 		}
 		if isReg {
 			ctype = "reg"
+			source = "REG_OFFER"
+			offerType = "REG_OFFER"
+		}
+		if strings.EqualFold(ctype, "percent") || strings.EqualFold(ctype, "percentage") {
+			offerType = "PERCENT"
 		}
 		return true, "Coupon applied.", map[string]any{
-			"discount": disc, "type": ctype, "couponCode": strings.ToUpper(code),
+			"discount": disc, "type": ctype, "offerType": offerType,
+			"source": source, "couponCode": strings.ToUpper(code),
 		}, 200
 	case "get_available_coupons":
 		list := []map[string]any{}
+		seen := map[string]bool{}
 		rows, err := s.DB.QueryContext(ctx, `
 SELECT code, value, ctype, label, description FROM app_coupons
 WHERE facility_id=$1 AND status='active' AND code NOT ILIKE 'REF-%'`, fid)
@@ -763,13 +910,19 @@ WHERE facility_id=$1 AND status='active' AND code NOT ILIKE 'REF-%'`, fid)
 				if rows.Scan(&code, &value, &ctype, &label, &desc) != nil {
 					continue
 				}
+				up := strings.ToUpper(strings.TrimSpace(code))
+				seen[up] = true
+				offerType := "PROMO"
+				if strings.EqualFold(ctype, "percent") || strings.EqualFold(ctype, "percentage") {
+					offerType = "PERCENT"
+				}
 				list = append(list, map[string]any{
-					"code": code, "value": value, "type": ctype,
-					"label": label, "description": desc, "source": "PROMO",
+					"code": code, "value": value, "type": offerType,
+					"ctype": ctype, "label": label, "description": desc, "source": "PROMO",
 				})
 			}
 		}
-		// User refund coupons (PHP get_available_coupons user REF branch).
+		// User refund / MEMBER coupons (app_user_coupons dual-write from CreateCoupons).
 		if uid > 0 {
 			urow, uerr := s.DB.QueryContext(ctx, `
 SELECT coupon_code, amount, COALESCE(expiry_date::text,'') FROM app_user_coupons
@@ -783,19 +936,58 @@ WHERE user_id=$1 AND facility_id=$2
 					if urow.Scan(&code, &amt, &exp) != nil {
 						continue
 					}
+					up := strings.ToUpper(strings.TrimSpace(code))
+					if seen[up] {
+						continue
+					}
+					seen[up] = true
+					label, source, offerType := "Refund coupon", "COUPON", "COUPON"
+					desc := "Cancellation refund"
+					if !strings.HasPrefix(up, "REF-") {
+						label, source, offerType = "Member coupon", "MEMBER", "MEMBER"
+						desc = "Thank-you discount"
+					}
 					list = append(list, map[string]any{
-						"code": code, "value": amt, "type": "flat",
-						"label": "Refund coupon", "description": "Cancellation refund",
-						"source": "COUPON", "expiryDate": exp,
+						"code": code, "value": amt, "type": offerType,
+						"label": label, "description": desc,
+						"source": source, "expiryDate": exp,
+					})
+				}
+			}
+			// Fallback: MEMBER only in booking_coupons (failed dual-write / older rows).
+			brow, berr := s.DB.QueryContext(ctx, `
+SELECT code, discount, COALESCE(valid_until::text,'') FROM booking_coupons
+WHERE facility_id=$1 AND user_id=$2 AND status='active'
+  AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)`, fid, uid)
+			if berr == nil {
+				defer brow.Close()
+				for brow.Next() {
+					var code, exp string
+					var amt float64
+					if brow.Scan(&code, &amt, &exp) != nil {
+						continue
+					}
+					up := strings.ToUpper(strings.TrimSpace(code))
+					if seen[up] {
+						continue
+					}
+					seen[up] = true
+					list = append(list, map[string]any{
+						"code": code, "value": amt, "type": "MEMBER",
+						"label": "Member coupon", "description": "Thank-you discount",
+						"source": "MEMBER", "expiryDate": exp,
 					})
 				}
 			}
 		}
 		return true, "OK", map[string]any{"coupons": list, "count": len(list)}, 200
 	case "initiate_payment":
+		if uid <= 0 {
+			return false, "Sign in with WhatsApp OTP to pay.", nil, 401
+		}
 		mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["paymentMode"])))
 		slots, _ := body["slots"].([]any)
-		coupon := strings.TrimSpace(fmt.Sprint(body["couponCode"]))
+		coupon := strField(body, "couponCode")
 		q, qerr := s.buildCheckoutQuote(ctx, fid, sportID, uid, slots, mode, coupon)
 		if qerr != nil {
 			return false, qerr.Error(), nil, 400
@@ -836,11 +1028,14 @@ WHERE user_id=$1 AND facility_id=$2
 		out["holdMinutes"] = int(slotHoldTTL.Minutes())
 		return true, "OK", out, 200
 	case "confirm_booking":
+		if uid <= 0 {
+			return false, "Sign in with WhatsApp OTP to confirm booking.", nil, 401
+		}
 		slots, _ := body["slots"].([]any)
 		method := strings.TrimSpace(fmt.Sprint(body["paymentMethod"]))
 		mode := normalizePayMode(fmt.Sprint(body["paymentMode"]), method)
 		txn := strings.TrimSpace(fmt.Sprint(body["razorpayPaymentId"]))
-		coupon := strings.TrimSpace(fmt.Sprint(body["couponCode"]))
+		coupon := strField(body, "couponCode")
 		if txn == "" {
 			return false, "razorpayPaymentId is required.", nil, 400
 		}
@@ -952,10 +1147,35 @@ func (s *Service) MyBookings(ctx context.Context, body map[string]any) (bool, st
 	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
 	switch action {
 	case "facilities":
-		u, _ := s.userRow(ctx, uid, fmt.Sprint(body["whatsappNo"]))
+		waHint := fmt.Sprint(body["whatsappNo"])
+		u, _ := s.userRow(ctx, uid, waHint)
 		ids := []int64{}
 		if u != nil {
 			ids = s.parseIDs(u["accessedFacilityIds"])
+		}
+		// Include facilities that only have StrollX payment holds for this WhatsApp.
+		pendingHolds := s.pendingPaymentHoldsForUser(ctx, uid, 0, waHint)
+		holdCountByFid := map[int64]int{}
+		holdNextByFid := map[int64]int64{}
+		seenFid := map[int64]bool{}
+		for _, id := range ids {
+			seenFid[id] = true
+		}
+		for _, h := range pendingHolds {
+			fid, _ := strconv.ParseInt(fmt.Sprint(h["facilityId"]), 10, 64)
+			if fid <= 0 {
+				continue
+			}
+			holdCountByFid[fid]++
+			if ts, _ := strconv.ParseInt(fmt.Sprint(h["raw_timestamp"]), 10, 64); ts > 0 {
+				if cur, ok := holdNextByFid[fid]; !ok || ts < cur {
+					holdNextByFid[fid] = ts
+				}
+			}
+			if !seenFid[fid] {
+				seenFid[fid] = true
+				ids = append(ids, fid)
+			}
 		}
 		now := time.Now().In(bookingTZ())
 		facilities := []map[string]any{}
@@ -999,6 +1219,12 @@ WHERE user_id=$1 AND facility_id=$2`, uid, fid)
 				}
 				rows.Close()
 			}
+			if hc := holdCountByFid[fid]; hc > 0 {
+				upc += hc
+				if hts := holdNextByFid[fid]; hts > 0 && (nextTs == 0 || hts < nextTs) {
+					nextTs = hts
+				}
+			}
 			group := "other"
 			if upc > 0 {
 				group = "upcoming"
@@ -1014,10 +1240,10 @@ WHERE user_id=$1 AND facility_id=$2`, uid, fid)
 				"customer_services_enabled": !maint,
 			}
 			if nextTs > 0 {
-				item["nextBookingAt"] = time.Unix(nextTs, 0).In(bookingTZ()).Format(time.RFC3339)
+				item["nextBookingAt"] = utcISO(time.Unix(nextTs, 0))
 			}
 			if lastTs > 0 {
-				item["lastBookingAt"] = time.Unix(lastTs, 0).In(bookingTZ()).Format(time.RFC3339)
+				item["lastBookingAt"] = utcISO(time.Unix(lastTs, 0))
 			}
 			facilities = append(facilities, item)
 			switch group {
@@ -1101,11 +1327,22 @@ ORDER BY b.id DESC`, uid, fid)
 				history = append(history, item)
 			}
 		}
+		// StrollX payment holds for this WhatsApp → awaiting payment in Upcoming.
+		waHint := fmt.Sprint(body["whatsappNo"])
+		for _, hold := range s.pendingPaymentHoldsForUser(ctx, uid, fid, waHint) {
+			upcoming = append(upcoming, hold)
+			sportName := strings.TrimSpace(fmt.Sprint(hold["sportName"]))
+			if sportName == "" {
+				sportName = "Booking"
+			}
+			upcomingGroups[sportName] = append(upcomingGroups[sportName], hold)
+		}
 		sortBookingsByStart(upcoming, true)
 		sortBookingsByStart(history, false)
 		coupons := []map[string]any{}
+		seenC := map[string]bool{}
 		crows, _ := s.DB.QueryContext(ctx, `
-SELECT coupon_code, amount, expiry_date::text, facility_id FROM app_user_coupons WHERE user_id=$1`, uid)
+SELECT coupon_code, amount, COALESCE(expiry_date::text,''), facility_id FROM app_user_coupons WHERE user_id=$1`, uid)
 		if crows != nil {
 			defer crows.Close()
 			for crows.Next() {
@@ -1113,11 +1350,43 @@ SELECT coupon_code, amount, expiry_date::text, facility_id FROM app_user_coupons
 				var amt float64
 				var cfid int64
 				_ = crows.Scan(&code, &amt, &exp, &cfid)
+				up := strings.ToUpper(strings.TrimSpace(code))
+				seenC[fmt.Sprintf("%d:%s", cfid, up)] = true
+				var cname string
+				_ = s.DB.QueryRowContext(ctx, `SELECT COALESCE(name,'') FROM app_facilities WHERE id=$1`, cfid).Scan(&cname)
+				source := "COUPON"
+				if !strings.HasPrefix(up, "REF-") {
+					source = "MEMBER"
+				}
+				coupons = append(coupons, map[string]any{
+					"couponCode": code, "amount": amt, "expiryDate": exp,
+					"facilityId": cfid, "facilityName": cname, "source": source,
+				})
+			}
+		}
+		// MEMBER rows only in booking_coupons (CreateCoupons PHP parity).
+		bcrows, _ := s.DB.QueryContext(ctx, `
+SELECT code, discount, COALESCE(valid_until::text,''), facility_id
+FROM booking_coupons
+WHERE user_id=$1 AND status='active'
+  AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)`, uid)
+		if bcrows != nil {
+			defer bcrows.Close()
+			for bcrows.Next() {
+				var code, exp string
+				var amt float64
+				var cfid int64
+				_ = bcrows.Scan(&code, &amt, &exp, &cfid)
+				key := fmt.Sprintf("%d:%s", cfid, strings.ToUpper(strings.TrimSpace(code)))
+				if seenC[key] {
+					continue
+				}
+				seenC[key] = true
 				var cname string
 				_ = s.DB.QueryRowContext(ctx, `SELECT COALESCE(name,'') FROM app_facilities WHERE id=$1`, cfid).Scan(&cname)
 				coupons = append(coupons, map[string]any{
 					"couponCode": code, "amount": amt, "expiryDate": exp,
-					"facilityId": cfid, "facilityName": cname,
+					"facilityId": cfid, "facilityName": cname, "source": "MEMBER",
 				})
 			}
 		}
@@ -1406,6 +1675,17 @@ ORDER BY created_at DESC LIMIT 100`, uid, sinceID)
 		var created time.Time
 		var expires sql.NullTime
 		_ = rows.Scan(&id, &userID, &fid, &bookingID, &ntype, &title, &nbody, &fname, &flogo, &seen, &source, &meta, &created, &expires)
+		// Hide billing reminders once the user has paid; mark meta so deletes are allowed later.
+		if strings.EqualFold(strings.TrimSpace(ntype), "billing_reminder") {
+			if s.notificationBillingIsPaid(ctx, userID, fid, meta) {
+				_, _ = s.DB.ExecContext(ctx, `
+UPDATE app_notifications
+SET meta_json = COALESCE(meta_json,'{}'::jsonb) || '{"isPaid":true,"requiresPayment":false}'::jsonb,
+    deleted_at = COALESCE(deleted_at, NOW())
+WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL`, id, userID)
+				continue
+			}
+		}
 		if id > latest {
 			latest = id
 		}
@@ -1415,9 +1695,12 @@ ORDER BY created_at DESC LIMIT 100`, uid, sinceID)
 		item := map[string]any{
 			"id": id, "userId": userID, "type": ntype, "title": title, "body": nbody,
 			"facilityName": fname, "facilityLogoUrl": flogo, "seen": seen, "source": source,
-			"createdAt": created.Format(time.RFC3339),
-			"createdAtLabel": created.Local().Format("02 Jan, 3:04 PM"),
-			"meta": json.RawMessage(meta),
+			"createdAt":      utcISO(created),
+			"createdAtLabel": created.In(bookingTZ()).Format("02 Jan, 3:04 PM"),
+			"meta":           json.RawMessage(meta),
+		}
+		if expires.Valid {
+			item["expiresAt"] = utcISO(expires.Time)
 		}
 		if fid.Valid {
 			item["facilityId"] = fid.Int64
@@ -1428,7 +1711,7 @@ ORDER BY created_at DESC LIMIT 100`, uid, sinceID)
 		items = append(items, item)
 		events = append(events, map[string]any{
 			"eventId": id, "id": id, "type": ntype, "title": title, "body": nbody,
-			"createdAt": created.Format(time.RFC3339),
+			"createdAt": utcISO(created),
 		})
 	}
 	if action == "poll" {

@@ -270,6 +270,11 @@ SELECT facility_id, status FROM booking_slots WHERE id=$1 FOR UPDATE`, in.SlotID
 	var userID interface{}
 	if in.UserID != nil {
 		userID = *in.UserID
+	} else if phone := strings.TrimSpace(in.CustomerPhone); phone != "" {
+		// Payment-link / walk-in: upsert app_users + facility users from WhatsApp + name.
+		if uid, uerr := s.ensureFacilityAppUser(ctx, facilityID, phone, in.CustomerName); uerr == nil && uid > 0 {
+			userID = uid
+		}
 	}
 	var bookingID int64
 	err = tx.QueryRowContext(ctx, `
@@ -295,6 +300,8 @@ UPDATE booking_slots SET status='booked', notes=NULLIF($2,''), updated_at=NOW() 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	// Keep Proximity app_slots in sync (strollx Book now / without note).
+	_ = s.syncAppSlotFromBookingSlot(ctx, in.SlotID)
 	return s.GetBooking(ctx, bookingID)
 }
 
@@ -333,7 +340,32 @@ WHERE id=$1 AND status='booked'`, slotID)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	_ = s.syncAppSlotFromBookingSlot(ctx, slotID)
 	return s.GetBooking(ctx, bookingID)
+}
+
+// syncAppSlotFromBookingSlot mirrors one booking_slots row into Proximity app_slots.
+func (s *Service) syncAppSlotFromBookingSlot(ctx context.Context, slotID int64) error {
+	if slotID <= 0 {
+		return nil
+	}
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO app_slots (facility_id, sport_id, court_name, slot_date, time_range, status)
+SELECT s.facility_id,
+       COALESCE(c.sport_id, 0),
+       c.name,
+       s.slot_date,
+       to_char(s.start_time, 'HH24:MI') || '-' || to_char(s.end_time, 'HH24:MI'),
+       CASE
+         WHEN s.status IN ('booked', 'blocked', 'held') THEN s.status
+         ELSE 'available'
+       END
+FROM booking_slots s
+JOIN booking_courts c ON c.id = s.court_id
+WHERE s.id = $1
+ON CONFLICT (facility_id, sport_id, court_name, slot_date, time_range) DO UPDATE
+SET status = EXCLUDED.status`, slotID)
+	return err
 }
 
 func (s *Service) GetBooking(ctx context.Context, id int64) (*Booking, error) {

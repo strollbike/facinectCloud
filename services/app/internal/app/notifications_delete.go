@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -59,20 +61,33 @@ func (s *Service) softDeleteNotifications(ctx context.Context, userID int64, ids
 		return 0, fmt.Errorf("invalid_user")
 	}
 	if deleteAll {
-		res, err := s.DB.ExecContext(ctx, `
-UPDATE app_notifications SET deleted_at=NOW()
+		rows, err := s.DB.QueryContext(ctx, `
+SELECT id FROM app_notifications
 WHERE user_id=$1 AND deleted_at IS NULL`, userID)
 		if err != nil {
 			return 0, err
 		}
-		n, _ := res.RowsAffected()
-		return int(n), nil
+		defer rows.Close()
+		var all []int64
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil && id > 0 {
+				all = append(all, id)
+			}
+		}
+		ids = all
 	}
 	if len(ids) == 0 {
+		if deleteAll {
+			return 0, nil
+		}
 		return 0, fmt.Errorf("ids_required")
 	}
 	n := 0
 	for _, id := range ids {
+		if blocked, _ := s.billingReminderDeleteBlocked(ctx, userID, id); blocked {
+			continue
+		}
 		res, err := s.DB.ExecContext(ctx, `
 UPDATE app_notifications SET deleted_at=NOW()
 WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL`, userID, id)
@@ -83,6 +98,80 @@ WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL`, userID, id)
 		n += int(c)
 	}
 	return n, nil
+}
+
+// billingReminderDeleteBlocked: unpaid payment reminders must stay until paid.
+func (s *Service) billingReminderDeleteBlocked(ctx context.Context, userID, notifID int64) (bool, error) {
+	var ntype string
+	var meta []byte
+	var fid sql.NullInt64
+	err := s.DB.QueryRowContext(ctx, `
+SELECT ntype, COALESCE(meta_json,'{}'::jsonb), facility_id
+FROM app_notifications WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL`, notifID, userID).
+		Scan(&ntype, &meta, &fid)
+	if err != nil {
+		return false, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(ntype), "billing_reminder") {
+		return false, nil
+	}
+	paid := s.notificationBillingIsPaid(ctx, userID, fid, meta)
+	if paid {
+		_, _ = s.DB.ExecContext(ctx, `
+UPDATE app_notifications
+SET meta_json = COALESCE(meta_json,'{}'::jsonb) || '{"isPaid":true,"requiresPayment":false}'::jsonb
+WHERE id=$1`, notifID)
+		return false, nil
+	}
+	return true, nil
+}
+
+// notificationBillingIsPaid: true when the user has no pending dues for the reminder facility.
+func (s *Service) notificationBillingIsPaid(ctx context.Context, userID int64, fid sql.NullInt64, meta []byte) bool {
+	var metaMap map[string]any
+	_ = json.Unmarshal(meta, &metaMap)
+	if metaMap != nil {
+		if metaMap["isPaid"] == true || fmt.Sprint(metaMap["isPaid"]) == "true" {
+			return true
+		}
+		if req := strings.ToLower(strings.TrimSpace(fmt.Sprint(metaMap["requiresPayment"]))); req == "false" {
+			return true
+		}
+	}
+	facilityID := int64(0)
+	if fid.Valid {
+		facilityID = fid.Int64
+	}
+	if facilityID <= 0 && metaMap != nil {
+		facilityID, _ = strconv.ParseInt(fmt.Sprint(metaMap["facilityId"]), 10, 64)
+	}
+	if userID <= 0 {
+		return false
+	}
+	body := map[string]any{
+		"userId": userID,
+		"status": "pending",
+	}
+	if facilityID > 0 {
+		body["facilityId"] = facilityID
+	}
+	if metaMap != nil {
+		aud := strings.ToLower(strings.TrimSpace(fmt.Sprint(metaMap["audience"])))
+		if aud == "member" || aud == "student" {
+			body["type"] = aud
+		}
+	}
+	ok, _, data := s.billingMyBills(ctx, body)
+	if !ok {
+		// Fail closed: treat as unpaid so reminder cannot be dismissed.
+		return false
+	}
+	m, _ := data.(map[string]any)
+	if m == nil {
+		return true
+	}
+	pending, _ := strconv.Atoi(fmt.Sprint(m["pendingCount"]))
+	return pending <= 0
 }
 
 // PurgeSoftDeletedNotifications hard-deletes soft-deleted rows older than retentionDays (default 90).

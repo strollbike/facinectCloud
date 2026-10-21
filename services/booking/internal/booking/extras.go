@@ -1,9 +1,11 @@
 package booking
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"sort"
@@ -19,6 +21,7 @@ type CollectPaymentInput struct {
 
 type RecurrenceBlockInput struct {
 	CourtID    *int64   `json:"court_id"`
+	CourtNames []string `json:"court_names"`
 	Days       []string `json:"days"`     // concrete yyyy-MM-dd (optional if weekdays set)
 	Weekdays   []int    `json:"weekdays"` // 1=Mon … 7=Sun — permanent weekly rule
 	WeeksAhead int      `json:"weeks_ahead"`
@@ -60,10 +63,103 @@ type BlockRuleItem struct {
 }
 
 type CreateCouponsInput struct {
-	Codes    []string `json:"codes"`
-	Count    int      `json:"count"`
-	Discount float64  `json:"discount"`
+	Codes    []string          `json:"codes"`
+	Count    int               `json:"count"`
+	Discount float64           `json:"discount"`
+	// PHP view-confirmed / api/v2 create_coupons shape (per member).
+	Coupons []CreateCouponItem `json:"coupons"`
 }
+
+// CreateCouponItem mirrors PHP CreateCoupon CALL args (MEMBER category).
+// Flutter / PHP often send discountVal and ids as strings — accept both.
+type CreateCouponItem struct {
+	UserID      flexInt64   `json:"userId"`
+	CouponCode  string      `json:"couponCode"`
+	Code        string      `json:"code"`
+	ValidUntil  string      `json:"validUntil"`
+	DiscountVal flexFloat64 `json:"discountVal"`
+	Discount    flexFloat64 `json:"discount"`
+	Created     string      `json:"created"`
+	FacilityID  flexInt64   `json:"facilityId"`
+}
+
+// flexFloat64 unmarshals JSON number or numeric string.
+type flexFloat64 float64
+
+func (f *flexFloat64) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*f = 0
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*f = 0
+			return nil
+		}
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return err
+		}
+		*f = flexFloat64(v)
+		return nil
+	}
+	var v float64
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*f = flexFloat64(v)
+	return nil
+}
+
+func (f flexFloat64) Float() float64 { return float64(f) }
+
+// flexInt64 unmarshals JSON number or numeric string.
+type flexInt64 int64
+
+func (i *flexInt64) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*i = 0
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*i = 0
+			return nil
+		}
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return err
+		}
+		*i = flexInt64(v)
+		return nil
+	}
+	var v int64
+	if err := json.Unmarshal(b, &v); err != nil {
+		// float like 12.0
+		var f float64
+		if err2 := json.Unmarshal(b, &f); err2 != nil {
+			return err
+		}
+		*i = flexInt64(int64(f))
+		return nil
+	}
+	*i = flexInt64(v)
+	return nil
+}
+
+func (i flexInt64) Int64() int64 { return int64(i) }
 
 type Coupon struct {
 	ID         int64   `json:"id"`
@@ -71,6 +167,8 @@ type Coupon struct {
 	Code       string  `json:"code"`
 	Discount   float64 `json:"discount"`
 	Status     string  `json:"status"`
+	UserID     int64   `json:"user_id,omitempty"`
+	ValidUntil string  `json:"valid_until,omitempty"`
 }
 
 type UserStatusInput struct {
@@ -177,6 +275,130 @@ VALUES ($1,$2,$3::int[],$4::time,$5::time,NULLIF($6,''),TRUE)`,
 		blocked += n
 	}
 	return blocked, nil
+}
+
+type BlockConflict struct {
+	SlotID       int64  `json:"slot_id"`
+	CourtName    string `json:"court_name"`
+	SlotDate     string `json:"slot_date"`
+	StartTime    string `json:"start_time"`
+	EndTime      string `json:"end_time"`
+	Status       string `json:"status"`
+	Plan         string `json:"plan"`
+	CustomerName string `json:"customer_name"`
+}
+
+// PreviewBlockConflicts lists booked slots the block would overlap.
+// Those dates stay booked; the caller can skip them and block the rest.
+func (s *Service) PreviewBlockConflicts(ctx context.Context, facilityID int64, in RecurrenceBlockInput) ([]BlockConflict, error) {
+	if facilityID <= 0 {
+		return nil, fmt.Errorf("invalid_facility")
+	}
+	start := normalizeTime(in.Start)
+	end := normalizeTime(in.End)
+	if start == "" || end == "" {
+		return nil, fmt.Errorf("start_end_required")
+	}
+	days := blockDates(in)
+	if len(days) == 0 {
+		return []BlockConflict{}, nil
+	}
+	names := make([]string, 0, len(in.CourtNames))
+	for _, n := range in.CourtNames {
+		n = strings.ToLower(strings.TrimSpace(n))
+		if n == "" || strings.Contains(n, "all") {
+			continue
+		}
+		names = append(names, n)
+	}
+	q := `
+SELECT s.id, COALESCE(c.name,''), s.slot_date::text, s.start_time::text, s.end_time::text,
+       s.status, COALESCE(s.notes,''), COALESCE(b.customer_name,''), COALESCE(b.notes,'')
+FROM booking_slots s
+LEFT JOIN booking_courts c ON c.id = s.court_id
+LEFT JOIN LATERAL (
+  SELECT customer_name, notes FROM booking_bookings
+  WHERE slot_id = s.id AND status <> 'cancelled'
+  ORDER BY id DESC LIMIT 1
+) b ON TRUE
+WHERE s.facility_id=$1
+  AND s.slot_date = ANY($2::date[])
+  AND s.status IN ('booked','held')
+  AND s.start_time >= $3::time AND s.end_time <= $4::time`
+	args := []interface{}{facilityID, "{" + strings.Join(days, ",") + "}", start, end}
+	if len(names) > 0 {
+		q += ` AND lower(c.name) = ANY($5::text[])`
+		args = append(args, pgTextArray(names))
+	} else if in.CourtID != nil && *in.CourtID > 0 {
+		q += ` AND s.court_id=$5`
+		args = append(args, *in.CourtID)
+	}
+	q += ` ORDER BY s.slot_date, c.name LIMIT 50`
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BlockConflict{}
+	for rows.Next() {
+		var c BlockConflict
+		var slotNotes, bookNotes string
+		if err := rows.Scan(
+			&c.SlotID, &c.CourtName, &c.SlotDate, &c.StartTime, &c.EndTime,
+			&c.Status, &slotNotes, &c.CustomerName, &bookNotes,
+		); err != nil {
+			return nil, err
+		}
+		c.Plan = blockConflictPlan(slotNotes, bookNotes, c.CustomerName)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func blockDates(in RecurrenceBlockInput) []string {
+	weekdays := normalizeWeekdays(in.Weekdays)
+	days := make([]string, 0, len(in.Days))
+	for _, d := range in.Days {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			days = append(days, d)
+		}
+	}
+	if len(weekdays) > 0 {
+		weeks := in.WeeksAhead
+		if weeks <= 0 || weeks > 5 {
+			weeks = 5
+		}
+		days = mergeUniqueDates(days, expandWeekdaysToDates(weekdays, weeks))
+	}
+	_, winTo := MonthWindow(time.Now())
+	winToStr := winTo.Format("2006-01-02")
+	todayStr := time.Now().Format("2006-01-02")
+	filtered := make([]string, 0, len(days))
+	for _, d := range days {
+		if d >= todayStr && d <= winToStr {
+			filtered = append(filtered, d)
+		}
+	}
+	return filtered
+}
+
+func pgTextArray(values []string) string {
+	parts := make([]string, len(values))
+	for i, v := range values {
+		parts[i] = `"` + strings.ReplaceAll(v, `"`, ``) + `"`
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+func blockConflictPlan(slotNotes, bookNotes, customer string) string {
+	for _, raw := range []string{slotNotes, bookNotes, customer} {
+		text := strings.TrimSpace(raw)
+		if text != "" {
+			return text
+		}
+	}
+	return "Booking"
 }
 
 func (s *Service) blockSlotsForDate(
@@ -351,7 +573,17 @@ func (s *Service) updateAvailableToBlocked(
 	q := `
 UPDATE booking_slots SET status='blocked', notes=$1, updated_at=NOW()
 WHERE facility_id=$2 AND slot_date=$3::date AND status='available'
-  AND start_time >= $4::time AND end_time <= $5::time`
+  AND start_time >= $4::time AND end_time <= $5::time
+  AND NOT EXISTS (
+    SELECT 1 FROM coaching_leaves l
+    JOIN student_coaching_plans p ON p.id = l.plan_id
+    WHERE l.facility_id = booking_slots.facility_id
+      AND l.leave_date = booking_slots.slot_date
+      AND NULLIF(p.start_time,'') IS NOT NULL
+      AND NULLIF(p.end_time,'') IS NOT NULL
+      AND booking_slots.start_time >= NULLIF(p.start_time,'')::time
+      AND booking_slots.end_time <= NULLIF(p.end_time,'')::time
+  )`
 	args := []interface{}{purpose, facilityID, day, start, end}
 	if courtID != nil && *courtID > 0 {
 		q += ` AND court_id=$6`
@@ -917,6 +1149,63 @@ WHERE id=$1 AND status='confirmed'`, bookingID, mode, amount)
 }
 
 func (s *Service) CreateCoupons(ctx context.Context, facilityID int64, in CreateCouponsInput) ([]Coupon, error) {
+	// Prefer PHP-shaped per-user coupons when provided.
+	if len(in.Coupons) > 0 {
+		out := make([]Coupon, 0, len(in.Coupons))
+		for _, item := range in.Coupons {
+			code := strings.TrimSpace(strings.ToUpper(item.CouponCode))
+			if code == "" {
+				code = strings.TrimSpace(strings.ToUpper(item.Code))
+			}
+			if code == "" {
+				c, err := stubBookingCoupon()
+				if err != nil {
+					return out, err
+				}
+				code = c
+			}
+			disc := item.DiscountVal.Float()
+			if disc <= 0 {
+				disc = item.Discount.Float()
+			}
+			if disc <= 0 {
+				disc = in.Discount
+			}
+			fid := facilityID
+			if item.FacilityID.Int64() > 0 {
+				fid = item.FacilityID.Int64()
+			}
+			uid := item.UserID.Int64()
+			validUntil := strings.TrimSpace(item.ValidUntil)
+			var id int64
+			err := s.DB.QueryRowContext(ctx, `
+INSERT INTO booking_coupons (facility_id, code, discount, status, user_id, valid_until)
+VALUES ($1,$2,$3,'active',$4, NULLIF($5,'')::date)
+ON CONFLICT (facility_id, code) DO UPDATE
+SET discount=EXCLUDED.discount, status='active',
+    user_id=COALESCE(EXCLUDED.user_id, booking_coupons.user_id),
+    valid_until=COALESCE(EXCLUDED.valid_until, booking_coupons.valid_until)
+RETURNING id`, fid, code, disc, nullInt64(uid), validUntil).Scan(&id)
+			if err != nil {
+				return out, err
+			}
+			// App checkout redeem path (same DB): app_user_coupons — PHP coupon_codes MEMBER parity.
+			if uid > 0 && disc > 0 {
+				if _, err := s.DB.ExecContext(ctx, `
+INSERT INTO app_user_coupons (user_id, facility_id, coupon_code, amount, expiry_date)
+VALUES ($1,$2,$3,$4, NULLIF($5,'')::date)`,
+					uid, fid, code, disc, validUntil); err != nil {
+					return out, fmt.Errorf("app_user_coupon: %w", err)
+				}
+			}
+			out = append(out, Coupon{
+				ID: id, FacilityID: fid, Code: code, Discount: disc, Status: "active",
+				UserID: uid, ValidUntil: validUntil,
+			})
+		}
+		return out, nil
+	}
+
 	codes := append([]string{}, in.Codes...)
 	if len(codes) == 0 {
 		count := in.Count
@@ -956,6 +1245,13 @@ RETURNING id`, facilityID, code, in.Discount).Scan(&id)
 	return out, nil
 }
 
+func nullInt64(v int64) interface{} {
+	if v <= 0 {
+		return nil
+	}
+	return v
+}
+
 func stubBookingCoupon() (string, error) {
 	const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	b := make([]byte, 6)
@@ -967,6 +1263,68 @@ func stubBookingCoupon() (string, error) {
 		b[i] = chars[n.Int64()]
 	}
 	return "SAVE" + string(b), nil
+}
+
+// MessageQuota mirrors PHP facilities.monthly_usage (remaining) + monthly_quota (cap).
+type MessageQuota struct {
+	MonthlyUsage int `json:"monthly_usage"`
+	MonthlyQuota int `json:"monthly_quota"`
+}
+
+const defaultMessageCredits = 50
+
+func (s *Service) GetMessageQuota(ctx context.Context, facilityID int64) (MessageQuota, error) {
+	out := MessageQuota{MonthlyUsage: defaultMessageCredits, MonthlyQuota: defaultMessageCredits}
+	if facilityID <= 0 {
+		return out, fmt.Errorf("invalid_facility")
+	}
+	var usage, quota int
+	err := s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(monthly_usage, $2), COALESCE(monthly_quota, $2)
+FROM facilities WHERE id=$1`, facilityID, defaultMessageCredits).Scan(&usage, &quota)
+	if err == sql.ErrNoRows {
+		// Ensure a facilities row exists for this id (shared identity DB).
+		_, _ = s.DB.ExecContext(ctx, `
+INSERT INTO facilities (id, name, slug, status, monthly_usage, monthly_quota, last_reset_date)
+VALUES ($1, $2, $3, 'active', $4, $4, NOW())
+ON CONFLICT (id) DO NOTHING`, facilityID, fmt.Sprintf("Facility %d", facilityID), fmt.Sprintf("facility-%d", facilityID), defaultMessageCredits)
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	if quota <= 0 {
+		quota = defaultMessageCredits
+	}
+	// usage may be 0 (exhausted) — keep it; only bootstrap missing columns already defaulted.
+	out.MonthlyUsage = usage
+	out.MonthlyQuota = quota
+	return out, nil
+}
+
+// ConsumeMessageQuota decrements remaining credits (PHP GREATEST(0, monthly_usage - n)).
+func (s *Service) ConsumeMessageQuota(ctx context.Context, facilityID int64, count int) (MessageQuota, error) {
+	if facilityID <= 0 {
+		return MessageQuota{}, fmt.Errorf("invalid_facility")
+	}
+	if count <= 0 {
+		return s.GetMessageQuota(ctx, facilityID)
+	}
+	// Ensure columns/row exist.
+	if _, err := s.GetMessageQuota(ctx, facilityID); err != nil {
+		return MessageQuota{}, err
+	}
+	res, err := s.DB.ExecContext(ctx, `
+UPDATE facilities
+SET monthly_usage = GREATEST(0, monthly_usage - $2), updated_at = NOW()
+WHERE id=$1`, facilityID, count)
+	if err != nil {
+		return MessageQuota{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return MessageQuota{}, fmt.Errorf("facility_not_found")
+	}
+	return s.GetMessageQuota(ctx, facilityID)
 }
 
 func (s *Service) UpdateUserStatus(ctx context.Context, facilityID, userID int64, in UserStatusInput) error {

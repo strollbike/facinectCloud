@@ -35,6 +35,7 @@ func main() {
 	}
 
 	svc := &members.Service{DB: sqlDB, Cfg: cfg}
+	svc.StartPaymentReminderCron()
 	srv := &httpapi.Server{Cfg: cfg, Members: svc, JWT: jwtVerifier}
 	log.Printf("members (go) listening on %s service_key=%v jwt=%v",
 		cfg.HTTPAddr, cfg.ServiceKey != "", jwtVerifier != nil)

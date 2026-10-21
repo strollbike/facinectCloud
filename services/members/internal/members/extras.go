@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -24,9 +25,11 @@ type Plan struct {
 }
 
 type CreatePlanInput struct {
-	Name         string   `json:"name"`
-	Price        *float64 `json:"price"`
-	DurationDays *int     `json:"duration_days"`
+	Name            string   `json:"name"`
+	Price           *float64 `json:"price"`
+	DurationDays    *int     `json:"duration_days"`
+	SlotTime        string   `json:"slotTime"`
+	SubFacilityName string   `json:"subFacilityName"`
 }
 
 type PlanSettings struct {
@@ -114,9 +117,11 @@ type DecideRequestInput struct {
 type ChangePlanInput struct {
 	MemberID  int64  `json:"member_id"`
 	PlanID    int64  `json:"plan_id"`
+	OldPlanID int64  `json:"old_plan_id"`
 	TeamName  string `json:"team_name"`
 	StartDate string `json:"start_date"`
 	EndDate   string `json:"end_date"`
+	FeeType   string `json:"fee_type"`
 	IsChange  bool   `json:"is_change"`
 }
 
@@ -153,6 +158,9 @@ func (s *Service) CreatePlan(ctx context.Context, facilityID int64, in CreatePla
 	name := strings.TrimSpace(in.Name)
 	if facilityID <= 0 || name == "" {
 		return nil, fmt.Errorf("invalid_plan")
+	}
+	if err := s.rejectDuplicatePlan(ctx, facilityID, 0, name, in.SubFacilityName, in.SlotTime); err != nil {
+		return nil, err
 	}
 	var price, days interface{}
 	if in.Price != nil {
@@ -250,11 +258,19 @@ SELECT settings_json FROM member_plan_settings WHERE plan_id=$1 AND facility_id=
 }
 
 func (s *Service) UpsertPlanSettings(ctx context.Context, facilityID, planID int64, settings map[string]interface{}) (*PlanSettings, error) {
-	if _, err := s.GetPlan(ctx, facilityID, planID); err != nil {
+	plan, err := s.GetPlan(ctx, facilityID, planID)
+	if err != nil {
 		return nil, fmt.Errorf("not_found")
 	}
 	if settings == nil {
 		settings = map[string]interface{}{}
+	}
+	if err := s.rejectDuplicatePlan(
+		ctx, facilityID, planID, plan.Name,
+		settingText(settings, "subFacilityName"),
+		settingText(settings, "slotTime"),
+	); err != nil {
+		return nil, err
 	}
 	raw, err := json.Marshal(settings)
 	if err != nil {
@@ -270,6 +286,71 @@ SET settings_json=EXCLUDED.settings_json, facility_id=EXCLUDED.facility_id, upda
 		return nil, err
 	}
 	return s.GetPlanSettings(ctx, facilityID, planID)
+}
+
+func settingText(settings map[string]interface{}, key string) string {
+	if settings == nil {
+		return ""
+	}
+	v, ok := settings[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "<nil>" {
+		return ""
+	}
+	return s
+}
+
+func (s *Service) rejectDuplicatePlan(ctx context.Context, facilityID, exceptPlanID int64, name, court, slot string) error {
+	nameKey := strings.ToLower(strings.TrimSpace(name))
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT LOWER(TRIM(p.name)),
+       COALESCE(s.settings_json->>'slotTime',''),
+       COALESCE(s.settings_json->>'subFacilityName','')
+FROM member_plans p
+LEFT JOIN member_plan_settings s ON s.plan_id = p.id AND s.facility_id = p.facility_id
+WHERE p.facility_id=$1 AND p.status='active' AND p.id<>$2`, facilityID, exceptPlanID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var existingName, existingSlot, existingCourt string
+		if err := rows.Scan(&existingName, &existingSlot, &existingCourt); err != nil {
+			return err
+		}
+		if nameKey != "" && existingName == nameKey {
+			return fmt.Errorf("duplicate_plan_name")
+		}
+		if planSlotsConflict(court, slot, existingCourt, existingSlot) {
+			return fmt.Errorf("duplicate_plan_slot")
+		}
+	}
+	return rows.Err()
+}
+
+func planSlotsConflict(court, slot, otherCourt, otherSlot string) bool {
+	a := normalizePlanText(slot)
+	b := normalizePlanText(otherSlot)
+	if a == "" || b == "" || a != b {
+		return false
+	}
+	ac := normalizePlanText(court)
+	bc := normalizePlanText(otherCourt)
+	if planCourtIsAll(ac) || planCourtIsAll(bc) {
+		return true
+	}
+	return ac != "" && ac == bc
+}
+
+func planCourtIsAll(court string) bool {
+	return court == "" || court == "all" || strings.Contains(court, "all sub")
+}
+
+func normalizePlanText(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(value)), " "))
 }
 
 func (s *Service) UpdatePlanTeam(ctx context.Context, facilityID, planID int64, in TeamInput) (int, error) {
@@ -480,6 +561,10 @@ WHERE ms.facility_id=$1 AND ms.status='active'`, facilityID)
 		msg = "Update from your facility on Facinect."
 	}
 	title := "Facility update"
+	fname := s.facilityDisplayName(ctx, facilityID)
+	if fname == "" {
+		fname = "Facinect"
+	}
 	for _, phone := range phones {
 		uid := s.resolveAppUserID(ctx, phone)
 		gotAny := false
@@ -497,7 +582,14 @@ WHERE ms.facility_id=$1 AND ms.status='active'`, facilityID)
 		} else {
 			out.NoAppUser++
 		}
-		if err := s.notifyWhatsApp(ctx, facilityID, phone, "member_broadcast", msg); err == nil {
+		// news_v3 (en_US): {{1}} facility, {{2}} name, {{3}} message
+		// Push already sent above — WhatsApp-only here to avoid double FCM.
+		if err := s.notifyChannel(ctx, facilityID, phone, "news_v3", "whatsapp", map[string]interface{}{
+			"language":    "en_US",
+			"body_params": []string{fname, "Member", msg},
+			"title":       title,
+			"body":        msg,
+		}); err == nil {
 			out.WhatsApp++
 			gotAny = true
 		}
@@ -510,6 +602,18 @@ WHERE ms.facility_id=$1 AND ms.status='active'`, facilityID)
 		out.Queued, out.AppPush, out.FcmPush, out.WhatsApp, out.NoAppUser,
 	)
 	return out, nil
+}
+
+func (s *Service) facilityDisplayName(ctx context.Context, facilityID int64) string {
+	var name string
+	_ = s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(NULLIF(name,''), '') FROM app_facilities WHERE id=$1`, facilityID).Scan(&name)
+	if name != "" {
+		return name
+	}
+	_ = s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(NULLIF(name,''), '') FROM facilities WHERE id=$1`, facilityID).Scan(&name)
+	return name
 }
 
 func (s *Service) resolveAppUserID(ctx context.Context, phone string) int64 {
@@ -600,20 +704,48 @@ func digitsOnlyPhone(raw string) string {
 
 func (s *Service) notifyWhatsApp(ctx context.Context, facilityID int64, phone, template, body string) error {
 	return s.notifyWhatsAppData(ctx, facilityID, phone, template, map[string]interface{}{
-		"body": body, "message": body, "text": body,
+		"body": body, "message": body, "text": body, "title": "Facinect",
 	})
 }
 
+// notifyWhatsAppData sends WhatsApp + push (phone resolves to app user / FCM).
 func (s *Service) notifyWhatsAppData(ctx context.Context, facilityID int64, phone, template string, data map[string]interface{}) error {
+	return s.notifyChannel(ctx, facilityID, phone, template, "both", data)
+}
+
+func (s *Service) notifyChannel(ctx context.Context, facilityID int64, phone, template, channel string, data map[string]interface{}) error {
 	base := strings.TrimRight(strings.TrimSpace(s.Cfg.NotificationsURL), "/")
 	if base == "" {
 		return fmt.Errorf("notifications_url_missing")
 	}
+	phone = digitsOnlyPhone(phone)
+	if phone == "" {
+		return fmt.Errorf("whatsapp_required")
+	}
 	if data == nil {
 		data = map[string]interface{}{}
 	}
+	ch := strings.ToLower(strings.TrimSpace(channel))
+	if ch == "" {
+		ch = "both"
+	}
+	// Ensure FCM has readable title/body when Meta template only has body_params.
+	if ch == "both" || ch == "push" {
+		if _, ok := data["title"]; !ok {
+			data["title"] = "Facinect"
+		}
+		if _, ok := data["body"]; !ok {
+			if msg, _ := data["message"].(string); strings.TrimSpace(msg) != "" {
+				data["body"] = msg
+			} else if text, _ := data["text"].(string); strings.TrimSpace(text) != "" {
+				data["body"] = text
+			} else {
+				data["body"] = "You have a new update from your facility."
+			}
+		}
+	}
 	payload := map[string]interface{}{
-		"channel":     "whatsapp",
+		"channel":     ch,
 		"facility_id": facilityID,
 		"template":    template,
 		"to":          map[string]string{"whatsapp": phone},
@@ -636,6 +768,15 @@ func (s *Service) notifyWhatsAppData(ctx context.Context, facilityID int64, phon
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode >= 300 {
 		return fmt.Errorf("notify_http_%d: %s", res.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var job map[string]interface{}
+	_ = json.Unmarshal(b, &job)
+	if st, _ := job["status"].(string); strings.EqualFold(st, "failed") {
+		errText, _ := job["error_text"].(string)
+		if errText == "" {
+			errText = "notify_failed"
+		}
+		return fmt.Errorf("%s", errText)
 	}
 	return nil
 }
@@ -677,9 +818,13 @@ SELECT COALESCE(name,'') FROM facilities WHERE id=$1`, row.FacilityID).Scan(&fac
 		displayPhone = displayPhone[len(displayPhone)-10:]
 	}
 	_ = s.notifyWhatsAppData(ctx, row.FacilityID, phone, "member_registration_confirmation", map[string]interface{}{
+		"title": "Welcome to " + facilityName,
+		"body":  fmt.Sprintf("Hi %s, your %s registration is confirmed.", row.FullName, plan),
 		"body_params": []string{
 			row.FullName, plan, roleName, benefit, facilityName, displayPhone,
 		},
+		// Same phone as the admin app: normal priority stays in the tray.
+		"android_priority": "normal",
 	})
 }
 
@@ -779,6 +924,26 @@ WHERE facility_id=$2 AND plan_id=$3 AND status='active'`, st, facilityID, planID
 	return int(n), nil
 }
 
+func planSettingAmount(settings map[string]interface{}, key string) (float64, bool) {
+	if settings == nil {
+		return 0, false
+	}
+	raw, ok := settings[key]
+	if !ok || raw == nil {
+		return 0, false
+	}
+	switch v := raw.(type) {
+	case float64:
+		return v, true
+	case json.Number:
+		n, err := v.Float64()
+		return n, err == nil
+	default:
+		n, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(v)), 64)
+		return n, err == nil
+	}
+}
+
 func (s *Service) ChangeOrAddPlan(ctx context.Context, facilityID int64, in ChangePlanInput) (int, error) {
 	plan, err := s.GetPlan(ctx, facilityID, in.PlanID)
 	if err != nil {
@@ -800,15 +965,79 @@ func (s *Service) ChangeOrAddPlan(ctx context.Context, facilityID int64, in Chan
 		}
 		end = in.EndDate
 	}
-	res, err := s.DB.ExecContext(ctx, `
+	fee := 0.0
+	if plan.Price != nil {
+		fee = *plan.Price
+	}
+	if settings, err := s.GetPlanSettings(ctx, facilityID, plan.ID); err == nil && settings != nil {
+		key := "indivPrice"
+		ft := strings.ToLower(strings.TrimSpace(in.FeeType))
+		if strings.Contains(ft, "grp") || strings.Contains(ft, "group") {
+			key = "grpPrice"
+		}
+		if parsed, ok := planSettingAmount(settings.Settings, key); ok {
+			fee = parsed
+		}
+	}
+	var onPlan int
+	if err := s.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM memberships
+WHERE facility_id=$1 AND member_id=$2 AND plan_id=$3 AND status='active'`,
+		facilityID, in.MemberID, plan.ID).Scan(&onPlan); err != nil {
+		return 0, err
+	}
+	if onPlan > 0 {
+		return 0, fmt.Errorf("already_on_plan")
+	}
+
+	team := strings.TrimSpace(in.TeamName)
+	if in.IsChange {
+		q := `
 UPDATE memberships SET
   plan_id=$1, plan_name=$2,
   team_name=COALESCE(NULLIF($3,''), team_name),
   start_date=COALESCE($4::date, start_date),
   end_date=COALESCE($5::date, end_date),
+  subscription_fee=$6,
   updated_at=NOW()
-WHERE facility_id=$6 AND member_id=$7 AND status='active'`,
-		plan.ID, plan.Name, strings.TrimSpace(in.TeamName), start, end, facilityID, in.MemberID)
+WHERE facility_id=$7 AND member_id=$8 AND status='active'`
+		args := []interface{}{plan.ID, plan.Name, team, start, end, fee, facilityID, in.MemberID}
+		if in.OldPlanID > 0 {
+			q += ` AND plan_id=$9`
+			args = append(args, in.OldPlanID)
+		}
+		res, err := s.DB.ExecContext(ctx, q, args...)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return 0, fmt.Errorf("membership_not_found")
+		}
+		return int(n), nil
+	}
+
+	var sport sql.NullInt64
+	err = s.DB.QueryRowContext(ctx, `
+SELECT sport_id FROM memberships
+WHERE facility_id=$1 AND member_id=$2
+ORDER BY id DESC LIMIT 1`, facilityID, in.MemberID).Scan(&sport)
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("member_not_found")
+	}
+	if err != nil {
+		return 0, err
+	}
+	var sportArg interface{}
+	if sport.Valid {
+		sportArg = sport.Int64
+	}
+	res, err := s.DB.ExecContext(ctx, `
+INSERT INTO memberships
+  (facility_id, member_id, sport_id, plan_id, plan_name, team_name,
+   start_date, end_date, subscription_fee, primary_member, status, payment_status)
+VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7::date,$8::date,$9,false,'active','unpaid')`,
+		facilityID, in.MemberID, sportArg, plan.ID, plan.Name, team, start, end, fee)
 	if err != nil {
 		return 0, err
 	}

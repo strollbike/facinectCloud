@@ -325,6 +325,7 @@ func (s *Service) notifyBookingWhatsAppTemplate(
 	if title == "" {
 		title = tmpl
 	}
+	// Callers already send FCM separately — keep WhatsApp-only here.
 	payload := map[string]any{
 		"channel":     "whatsapp",
 		"facility_id": facilityID,
@@ -358,6 +359,7 @@ func (s *Service) notifyBookingWhatsAppText(
 	if title == "" {
 		title = "WhatsApp"
 	}
+	// Callers already send FCM separately — keep WhatsApp-only here.
 	payload := map[string]any{
 		"channel":     "whatsapp",
 		"facility_id": facilityID,
@@ -370,6 +372,7 @@ func (s *Service) notifyBookingWhatsAppText(
 			"message_type": "text",
 			"message":      message,
 			"title":        title,
+			"body":         message,
 			"type":         "text",
 		},
 	}

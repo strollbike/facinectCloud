@@ -84,6 +84,36 @@ ALTER TABLE student_attendance ADD COLUMN IF NOT EXISTS leave_reason TEXT NOT NU
 CREATE INDEX IF NOT EXISTS idx_student_attendance_facility_date
   ON student_attendance(facility_id, attendance_date);
 
+-- Coach/staff daily attendance gate before student attendance.
+CREATE TABLE IF NOT EXISTS coach_attendance (
+  id                BIGSERIAL PRIMARY KEY,
+  facility_id       BIGINT NOT NULL,
+  coach_user_id     BIGINT NOT NULL,
+  attendance_date   DATE NOT NULL,
+  status            VARCHAR(16) NOT NULL DEFAULT 'present'
+                    CHECK (status IN ('present','absent')),
+  sport_id          VARCHAR(64) NOT NULL DEFAULT '',
+  notes             TEXT NOT NULL DEFAULT '',
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (facility_id, coach_user_id, attendance_date)
+);
+CREATE INDEX IF NOT EXISTS idx_coach_attendance_facility_date
+  ON coach_attendance(facility_id, attendance_date);
+
+-- Facility attendance config: batch start (App Setup) + geofence radius (Administration).
+CREATE TABLE IF NOT EXISTS facility_attendance_settings (
+  facility_id                BIGINT PRIMARY KEY,
+  batch_start_time           VARCHAR(8) NOT NULL DEFAULT '06:00',
+  attendance_radius_meters   INT NOT NULL DEFAULT 150,
+  facility_latitude          DOUBLE PRECISION NULL,
+  facility_longitude         DOUBLE PRECISION NULL,
+  reminder_offset_minutes    INT NOT NULL DEFAULT 52,
+  updated_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE facility_attendance_settings
+  ADD COLUMN IF NOT EXISTS reminder_offset_minutes INT NOT NULL DEFAULT 52;
+
 CREATE TABLE IF NOT EXISTS student_coaching_plans (
   id              BIGSERIAL PRIMARY KEY,
   facility_id     BIGINT NOT NULL,
@@ -91,14 +121,37 @@ CREATE TABLE IF NOT EXISTS student_coaching_plans (
   total_fee       NUMERIC(12,2) NOT NULL DEFAULT 0,
   days_per_week   INT NOT NULL DEFAULT 0,
   description     TEXT NOT NULL DEFAULT '',
+  start_time      VARCHAR(8) NOT NULL DEFAULT '',
+  end_time        VARCHAR(8) NOT NULL DEFAULT '',
   status          VARCHAR(16) NOT NULL DEFAULT 'active'
                   CHECK (status IN ('active','inactive')),
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (facility_id, name)
 );
+ALTER TABLE student_coaching_plans ADD COLUMN IF NOT EXISTS start_time VARCHAR(8) NOT NULL DEFAULT '';
+ALTER TABLE student_coaching_plans ADD COLUMN IF NOT EXISTS end_time VARCHAR(8) NOT NULL DEFAULT '';
+ALTER TABLE student_coaching_plans ADD COLUMN IF NOT EXISTS coaching_days VARCHAR(32) NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_student_coaching_plans_facility
   ON student_coaching_plans(facility_id, status);
+
+-- Cash received tracking per month (does not change plan fee / bill_amount).
+ALTER TABLE fee_bills ADD COLUMN IF NOT EXISTS payment_note TEXT NOT NULL DEFAULT '';
+
+-- Class cancelled for a coaching date. Slots in that batch window stay bookable.
+CREATE TABLE IF NOT EXISTS coaching_leaves (
+  id           BIGSERIAL PRIMARY KEY,
+  facility_id  BIGINT NOT NULL,
+  plan_id      BIGINT NOT NULL,
+  leave_date   DATE NOT NULL,
+  note         TEXT NOT NULL,
+  created_by   BIGINT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (facility_id, plan_id, leave_date)
+);
+CREATE INDEX IF NOT EXISTS idx_coaching_leaves_facility_date
+  ON coaching_leaves(facility_id, leave_date);
 `)
 	return err
 }

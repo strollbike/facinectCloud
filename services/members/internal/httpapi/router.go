@@ -41,6 +41,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/members/facilities/{facilityId}/bulk-group", s.withAuth(s.handleBulkGroup))
 	mux.HandleFunc("POST /v1/members/facilities/{facilityId}/coupons", s.withAuth(s.handleGenerateCoupons))
 	mux.HandleFunc("POST /v1/members/facilities/{facilityId}/bulk-notify", s.withAuth(s.handleBulkNotify))
+	mux.HandleFunc("POST /v1/members/facilities/{facilityId}/payment-reminders", s.withAuth(s.handlePaymentReminders))
+	mux.HandleFunc("GET /v1/members/facilities/{facilityId}/payment-reminder-schedule", s.withAuth(s.handleGetPaymentReminderSchedule))
+	mux.HandleFunc("PUT /v1/members/facilities/{facilityId}/payment-reminder-schedule", s.withAuth(s.handlePutPaymentReminderSchedule))
+	mux.HandleFunc("POST /v1/members/facilities/{facilityId}/payment-reminder-schedule", s.withAuth(s.handlePutPaymentReminderSchedule))
 	mux.HandleFunc("GET /v1/members/facilities/{facilityId}/open-slots", s.withAuth(s.handleListOpenSlots))
 	mux.HandleFunc("POST /v1/members/facilities/{facilityId}/open-slots", s.withAuth(s.handleCreateOpenSlot))
 	mux.HandleFunc("POST /v1/members/memberships/{id}/payment-status", s.withAuth(s.handlePaymentStatus))
@@ -529,6 +533,82 @@ func (s *Server) handleBulkNotify(w http.ResponseWriter, r *http.Request, ac *au
 		"noFcmToken": result.NoFcmToken,
 		"message":    result.Message,
 	})
+}
+
+func (s *Server) handlePaymentReminders(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, err := pathInt(r, "facilityId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_facility_id"})
+		return
+	}
+	if err := s.requireFacility(ac, fid); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	var in members.PaymentReminderInput
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
+	if strings.TrimSpace(in.Audience) == "" {
+		in.Audience = "member"
+	}
+	result, err := s.Members.SendPaymentReminders(r.Context(), fid, in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"queued":    result.Queued,
+		"whatsapp":  result.WhatsApp,
+		"fcmPush":   result.FcmPush,
+		"appPush":   result.AppPush,
+		"noAppUser": result.NoAppUser,
+		"message":   result.Message,
+	})
+}
+
+func (s *Server) handleGetPaymentReminderSchedule(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, err := pathInt(r, "facilityId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_facility_id"})
+		return
+	}
+	if err := s.requireFacility(ac, fid); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	audience := strings.TrimSpace(r.URL.Query().Get("audience"))
+	if audience == "" {
+		audience = "member"
+	}
+	sch, err := s.Members.GetPaymentReminderSchedule(r.Context(), fid, audience)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "schedule": sch})
+}
+
+func (s *Server) handlePutPaymentReminderSchedule(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, err := pathInt(r, "facilityId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_facility_id"})
+		return
+	}
+	if err := s.requireFacility(ac, fid); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	var in members.PaymentReminderSchedule
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
+	if strings.TrimSpace(in.Audience) == "" {
+		in.Audience = strings.TrimSpace(r.URL.Query().Get("audience"))
+	}
+	sch, err := s.Members.SetPaymentReminderSchedule(r.Context(), fid, in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "schedule": sch})
 }
 
 func (s *Server) handleListOpenSlots(w http.ResponseWriter, r *http.Request, ac *authCtx) {
