@@ -47,6 +47,8 @@ func (w *WhatsAppClient) Send(ctx context.Context, req SendRequest, creds WhatsA
 			lang = strings.TrimSpace(v)
 		}
 	}
+	// Map legacy / app-facing names onto templates approved on this WABA.
+	tmpl, lang = resolveWhatsAppTemplate(tmpl, lang)
 
 	token := strings.TrimSpace(creds.AccessToken)
 	phoneID := strings.TrimSpace(creds.PhoneNumberID)
@@ -139,6 +141,30 @@ func dataString(data map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// resolveWhatsAppTemplate maps logical template keys to Meta-approved names/languages.
+// payment_reminder_dns is the Facinect PHP billing template (language en, 3 body params).
+// member_broadcast / student_broadcast are not on this WABA; news_v3 (en_US) is.
+func resolveWhatsAppTemplate(name, lang string) (string, string) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "payment_reminder_dns":
+		if lang == "" {
+			return name, "en"
+		}
+		return name, lang
+	case "payment_reminder", "payment_notice":
+		return "payment_notice_v3", "en_US"
+	case "member_broadcast", "student_broadcast", "booking_message", "facility_broadcast", "news":
+		return "news_v3", "en_US"
+	case "hello_world1":
+		if lang == "" || lang == "en" {
+			return name, "en"
+		}
+		return name, lang
+	default:
+		return name, lang
+	}
 }
 
 // buildTemplateComponents mirrors Facinect PHP OTP + body/button/header templates.

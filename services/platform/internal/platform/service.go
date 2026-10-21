@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/facinect/platform/internal/config"
 )
@@ -36,20 +37,103 @@ type OnboardingStatusIn struct {
 
 func (s *Service) OnboardingStatus(ctx context.Context, in OnboardingStatusIn) map[string]interface{} {
 	none := map[string]interface{}{"status": "none", "isActive": 0}
+	email := normalizeEmail(in.Email)
+	wa := normalizeWhatsApp(in.WhatsappNumber)
+	paths := map[string]interface{}{
+		"facility":    clonePathStatus(none),
+		"tournaments": clonePathStatus(none),
+		"referee":     clonePathStatus(none),
+	}
+	if email != "" || wa != "" {
+		rows, err := s.DB.QueryContext(ctx, `
+SELECT kind, status, id, created_at::text
+FROM platform_onboarding_requests
+WHERE ($1 <> '' AND lower(trim(COALESCE(email,''))) = $1)
+   OR ($2 <> '' AND regexp_replace(COALESCE(whatsapp_number,''), '\D', '', 'g') = $2)
+ORDER BY id DESC`, email, wa)
+		if err == nil {
+			defer rows.Close()
+			seen := map[string]bool{}
+			for rows.Next() {
+				var kind, status, created string
+				var id int64
+				if err := rows.Scan(&kind, &status, &id, &created); err != nil {
+					continue
+				}
+				pathKey := kind
+				switch strings.ToLower(strings.TrimSpace(kind)) {
+				case "facility":
+					pathKey = "facility"
+				case "tournament", "tournaments":
+					pathKey = "tournaments"
+				case "referee":
+					pathKey = "referee"
+				default:
+					continue
+				}
+				if seen[pathKey] {
+					continue
+				}
+				seen[pathKey] = true
+				st := strings.ToLower(strings.TrimSpace(status))
+				active := 0
+				uiStatus := st
+				switch st {
+				case "approved", "active":
+					uiStatus = "approved"
+					active = 1
+				case "submitted", "pending":
+					uiStatus = "pending"
+				case "rejected", "closed":
+					uiStatus = "rejected"
+				}
+				paths[pathKey] = map[string]interface{}{
+					"status":     uiStatus,
+					"isActive":   active,
+					"requestId":  id,
+					"created_at": created,
+				}
+			}
+		}
+	}
+
+	drafts := []interface{}{}
+	if email != "" {
+		var draft []byte
+		var dwa string
+		err := s.DB.QueryRowContext(ctx, `
+SELECT draft, COALESCE(whatsapp_number,'') FROM platform_onboarding_drafts WHERE email=$1`, email).
+			Scan(&draft, &dwa)
+		if err == nil && len(draft) > 0 {
+			var raw interface{}
+			_ = json.Unmarshal(draft, &raw)
+			drafts = append(drafts, map[string]interface{}{
+				"email":          email,
+				"whatsappNumber": dwa,
+				"draft":          raw,
+				"path":           "facility",
+			})
+		}
+	}
+
 	return map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{
-			"email":           strings.TrimSpace(strings.ToLower(in.Email)),
-			"whatsappNumber":  strings.TrimSpace(in.WhatsappNumber),
-			"canContinue":     true,
-			"paths": map[string]interface{}{
-				"facility":    none,
-				"tournaments": none,
-				"referee":     none,
-			},
-			"drafts": []interface{}{},
+			"email":          email,
+			"whatsappNumber": strings.TrimSpace(in.WhatsappNumber),
+			"canContinue":    true,
+			"paths":          paths,
+			"drafts":         drafts,
 		},
 	}
+}
+
+func clonePathStatus(src map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
 }
 
 type DraftIn struct {
@@ -264,7 +348,7 @@ func (s *Service) SubmitOnboarding(ctx context.Context, kind string, in SubmitIn
 	var id int64
 	err := s.DB.QueryRowContext(ctx, `
 INSERT INTO platform_onboarding_requests (kind, email, whatsapp_number, payload, status)
-VALUES ($1, NULLIF($2,''), NULLIF($3,''), $4::jsonb, 'submitted')
+VALUES ($1, NULLIF($2,''), NULLIF($3,''), $4::jsonb, 'approved')
 RETURNING id`,
 		kind,
 		email,
@@ -274,10 +358,395 @@ RETURNING id`,
 	if err != nil {
 		return nil, err
 	}
+	out := map[string]interface{}{
+		"id":       id,
+		"kind":     kind,
+		"status":   "approved",
+		"isActive": 1,
+	}
+	// Fresh onboarding defaults to approved: provision facility so Google login works.
+	if kind == "facility" {
+		if fid, uid, perr := s.provisionApprovedFacility(ctx, email, wa, payloadMap); perr != nil {
+			return map[string]interface{}{
+				"success": false,
+				"error":   "provision_failed",
+				"message": perr.Error(),
+				"data":    out,
+			}, perr
+		} else {
+			out["facilityId"] = fid
+			out["userId"] = uid
+		}
+	}
 	return map[string]interface{}{
 		"success": true,
-		"data":    map[string]interface{}{"id": id, "kind": kind},
+		"data":    out,
 	}, nil
+}
+
+func (s *Service) provisionApprovedFacility(
+	ctx context.Context,
+	email, wa string,
+	payload map[string]interface{},
+) (facilityID, userID int64, err error) {
+	name := strings.TrimSpace(payloadString(payload, "facilityName", "name", "display_name"))
+	if name == "" {
+		return 0, 0, fmt.Errorf("facility_name_required")
+	}
+	location := strings.TrimSpace(payloadString(payload, "location", "address"))
+	contact := strings.TrimSpace(payloadString(payload, "contactName", "contact_name", "adminName"))
+	alt := strings.TrimSpace(payloadString(payload, "alternateNumber", "phone"))
+	mapURL := strings.TrimSpace(payloadString(payload, "googleMapUrl", "map_url", "mapUrl"))
+	logoURL := strings.TrimSpace(payloadString(payload, "facilityLogoUrl", "logo_url", "logoUrl"))
+	notes := strings.TrimSpace(payloadString(payload, "notes"))
+	if logoURL == "" {
+		if b64 := strings.TrimSpace(payloadString(payload, "logoBase64")); b64 != "" {
+			mime := strings.TrimSpace(payloadString(payload, "logoMime"))
+			if mime == "" {
+				mime = "image/jpeg"
+			}
+			logoURL = "data:" + mime + ";base64," + b64
+		}
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	fullName := contact
+	if fullName == "" {
+		fullName = name
+	}
+	if email != "" {
+		err = tx.QueryRowContext(ctx, `
+INSERT INTO users (email, phone_e164, full_name, status)
+VALUES (NULLIF($1,''), NULLIF($2,''), $3, 'active')
+ON CONFLICT (email) DO UPDATE SET
+  phone_e164 = COALESCE(EXCLUDED.phone_e164, users.phone_e164),
+  full_name = CASE WHEN EXCLUDED.full_name <> '' THEN EXCLUDED.full_name ELSE users.full_name END,
+  updated_at = NOW()
+RETURNING id`, email, nullIfEmpty(waE164(wa)), fullName).Scan(&userID)
+	} else {
+		err = tx.QueryRowContext(ctx, `
+INSERT INTO users (phone_e164, full_name, status)
+VALUES (NULLIF($1,''), $2, 'active')
+RETURNING id`, nullIfEmpty(waE164(wa)), fullName).Scan(&userID)
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+
+	slug, err := uniqueFacilitySlug(ctx, tx, name)
+	if err != nil {
+		return 0, 0, err
+	}
+	err = tx.QueryRowContext(ctx, `
+INSERT INTO facilities (name, slug, status) VALUES ($1,$2,'active') RETURNING id`,
+		name, slug).Scan(&facilityID)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO user_facility_memberships (user_id, facility_id, role, page_access, status)
+VALUES ($1,$2,'admin',NULL,'active')
+ON CONFLICT (user_id, facility_id) DO UPDATE SET role='admin', status='active', updated_at=NOW()`,
+		userID, facilityID)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	_, _ = tx.ExecContext(ctx, `
+INSERT INTO facility_profiles
+  (facility_id, display_name, location, phone, whatsapp, map_url, logo_url, notes, updated_at)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),NOW())
+ON CONFLICT (facility_id) DO UPDATE SET
+  display_name=EXCLUDED.display_name,
+  location=COALESCE(EXCLUDED.location, facility_profiles.location),
+  phone=COALESCE(EXCLUDED.phone, facility_profiles.phone),
+  whatsapp=COALESCE(EXCLUDED.whatsapp, facility_profiles.whatsapp),
+  map_url=COALESCE(EXCLUDED.map_url, facility_profiles.map_url),
+  logo_url=COALESCE(EXCLUDED.logo_url, facility_profiles.logo_url),
+  notes=COALESCE(EXCLUDED.notes, facility_profiles.notes),
+  updated_at=NOW()`,
+		facilityID, name, location, alt, waE164(wa), mapURL, logoURL, notes,
+	)
+
+	// Keep app_facilities id aligned with facilities id for dual-stack.
+	// Default pin near Chennai when location mentions it so proximity nearby search
+	// is not empty (0,0 is filtered out by radius).
+	lat, lon := 0.0, 0.0
+	locLower := strings.ToLower(location)
+	if strings.Contains(locLower, "chennai") || strings.Contains(locLower, "selaiyur") {
+		lat, lon = 12.9165, 80.1462
+	}
+	cityName := ""
+	if strings.Contains(locLower, "chennai") {
+		cityName = "Chennai"
+	}
+	_, _ = tx.ExecContext(ctx, `
+INSERT INTO app_facilities (id, name, location, city_name, logo_url, latitude, longitude, status, customer_ok)
+VALUES ($1,$2,COALESCE(NULLIF($3,''),''), $5, COALESCE(NULLIF($4,''),''), $6, $7, 'active', TRUE)
+ON CONFLICT (id) DO UPDATE SET
+  name=EXCLUDED.name,
+  location=CASE WHEN EXCLUDED.location <> '' THEN EXCLUDED.location ELSE app_facilities.location END,
+  city_name=CASE WHEN EXCLUDED.city_name <> '' THEN EXCLUDED.city_name ELSE app_facilities.city_name END,
+  logo_url=CASE WHEN EXCLUDED.logo_url <> '' THEN EXCLUDED.logo_url ELSE app_facilities.logo_url END,
+  latitude=CASE WHEN app_facilities.latitude=0 AND EXCLUDED.latitude<>0 THEN EXCLUDED.latitude ELSE app_facilities.latitude END,
+  longitude=CASE WHEN app_facilities.longitude=0 AND EXCLUDED.longitude<>0 THEN EXCLUDED.longitude ELSE app_facilities.longitude END`,
+		facilityID, name, location, logoURL, cityName, lat, lon,
+	)
+	// Bump identity sequence after explicit-id insert (ignore if sequence missing).
+	_, _ = tx.ExecContext(ctx, `
+DO $$
+DECLARE seq text;
+BEGIN
+  seq := pg_get_serial_sequence('app_facilities', 'id');
+  IF seq IS NOT NULL THEN
+    PERFORM setval(seq, GREATEST((SELECT COALESCE(MAX(id),1) FROM app_facilities), 1), true);
+  END IF;
+END $$`)
+
+	if _, err = tx.ExecContext(ctx, `
+INSERT INTO facility_service_flags (facility_id, staff_enabled, customer_enabled, updated_at)
+VALUES ($1,TRUE,TRUE,NOW()) ON CONFLICT (facility_id) DO NOTHING`, facilityID); err != nil {
+		return 0, 0, fmt.Errorf("service_flags: %w", err)
+	}
+
+	if sportsRaw, ok := payload["sports"]; ok {
+		switch sports := sportsRaw.(type) {
+		case []interface{}:
+			for i, raw := range sports {
+				sm, ok := raw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				sportName := strings.TrimSpace(fmt.Sprint(sm["sportName"]))
+				if sportName == "" || sportName == "<nil>" {
+					sportName = strings.TrimSpace(fmt.Sprint(sm["name"]))
+				}
+				if sportName == "" || sportName == "<nil>" {
+					continue
+				}
+				var catalogID *int64
+				if sid := toInt64(sm["sportId"]); sid > 0 {
+					catalogID = &sid
+				}
+				var sportPK int64
+				err = tx.QueryRowContext(ctx, `
+INSERT INTO facility_sports (facility_id, name, sort_order, status, catalog_sport_id)
+VALUES ($1,$2,$3,'active',$4)
+ON CONFLICT (facility_id, name) DO UPDATE SET
+  status='active', catalog_sport_id=COALESCE(EXCLUDED.catalog_sport_id, facility_sports.catalog_sport_id), updated_at=NOW()
+RETURNING id`, facilityID, sportName, i, catalogID).Scan(&sportPK)
+				if err != nil {
+					continue
+				}
+				subs, _ := sm["subs"].([]interface{})
+				if len(subs) == 0 {
+					subs, _ = sm["courts"].([]interface{})
+				}
+				for _, subRaw := range subs {
+					sub, ok := subRaw.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					cname := strings.TrimSpace(fmt.Sprint(sub["subFacilityName"]))
+					if cname == "" || cname == "<nil>" {
+						cname = strings.TrimSpace(fmt.Sprint(sub["name"]))
+					}
+					if cname == "" || cname == "<nil>" {
+						cname = "Court 1"
+					}
+					openT := strings.TrimSpace(fmt.Sprint(sub["openingTime"]))
+					closeT := strings.TrimSpace(fmt.Sprint(sub["closingTime"]))
+					if openT == "<nil>" {
+						openT = ""
+					}
+					if closeT == "<nil>" {
+						closeT = ""
+					}
+					price := toFloat64(sub["price"])
+					if _, err := tx.ExecContext(ctx, `
+INSERT INTO facility_courts (facility_id, sport_id, name, price_per_hour, open_time, close_time, status)
+VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),'active')`,
+						facilityID, sportPK, cname, price, openT, closeT,
+					); err != nil {
+						return 0, 0, fmt.Errorf("facility_court: %w", err)
+					}
+					// Booking module reads booking_courts — keep in sync on onboard.
+					if _, err := tx.ExecContext(ctx, `
+INSERT INTO booking_courts (facility_id, name, sport_id, status)
+SELECT $1::bigint, $2::text, $3::bigint, 'active'
+WHERE NOT EXISTS (
+  SELECT 1 FROM booking_courts
+  WHERE facility_id=$1::bigint AND LOWER(name)=LOWER($2::text)
+)`, facilityID, cname, sportPK); err != nil {
+						return 0, 0, fmt.Errorf("booking_court: %w", err)
+					}
+				}
+			}
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO booking_facility_schedule (facility_id, open_hour, close_hour, slot_minutes, updated_at)
+VALUES ($1,6,22,60,NOW())
+ON CONFLICT (facility_id) DO NOTHING`, facilityID); err != nil {
+		return 0, 0, fmt.Errorf("booking_schedule: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit: %w", err)
+	}
+	_, _ = s.seedBookingSlots(ctx, facilityID, 6, 22, 60)
+	return facilityID, userID, nil
+}
+
+func (s *Service) seedBookingSlots(ctx context.Context, facilityID int64, openH, closeH, mins int) (int, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT id FROM booking_courts WHERE facility_id=$1 AND status='active'`, facilityID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var courtIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		courtIDs = append(courtIDs, id)
+	}
+	if len(courtIDs) == 0 {
+		return 0, nil
+	}
+	now := time.Now()
+	from := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	created := 0
+	for d := 0; d < 30; d++ {
+		date := from.AddDate(0, 0, d).Format("2006-01-02")
+		for _, courtID := range courtIDs {
+			for t := openH * 60; t+mins <= closeH*60; t += mins {
+				start := fmt.Sprintf("%02d:%02d:00", t/60, t%60)
+				endM := t + mins
+				end := fmt.Sprintf("%02d:%02d:00", endM/60, endM%60)
+				res, err := s.DB.ExecContext(ctx, `
+INSERT INTO booking_slots (facility_id, court_id, slot_date, start_time, end_time, status)
+VALUES ($1,$2,$3::date,$4::time,$5::time,'available')
+ON CONFLICT (court_id, slot_date, start_time) DO NOTHING`,
+					facilityID, courtID, date, start, end)
+				if err != nil {
+					return created, err
+				}
+				n, _ := res.RowsAffected()
+				created += int(n)
+			}
+		}
+	}
+	return created, nil
+}
+
+func nullIfEmpty(v string) interface{} {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	return v
+}
+
+func waE164(digits string) string {
+	d := normalizeWhatsApp(digits)
+	if d == "" {
+		return ""
+	}
+	if strings.HasPrefix(d, "+") {
+		return d
+	}
+	if len(d) == 10 {
+		return "+91" + d
+	}
+	return "+" + d
+}
+
+func toInt64(v interface{}) int64 {
+	switch t := v.(type) {
+	case float64:
+		return int64(t)
+	case int64:
+		return t
+	case int:
+		return int64(t)
+	case json.Number:
+		n, _ := t.Int64()
+		return n
+	default:
+		var n int64
+		fmt.Sscan(fmt.Sprint(v), &n)
+		return n
+	}
+}
+
+func toFloat64(v interface{}) float64 {
+	switch t := v.(type) {
+	case float64:
+		return t
+	case int64:
+		return float64(t)
+	case int:
+		return float64(t)
+	case json.Number:
+		n, _ := t.Float64()
+		return n
+	default:
+		var n float64
+		fmt.Sscan(fmt.Sprint(v), &n)
+		return n
+	}
+}
+
+func uniqueFacilitySlug(ctx context.Context, tx *sql.Tx, name string) (string, error) {
+	base := slugifyFacility(name)
+	if base == "" {
+		base = "facility"
+	}
+	slug := base
+	for i := 0; i < 50; i++ {
+		var exists int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM facilities WHERE slug=$1 LIMIT 1`, slug).Scan(&exists)
+		if err == sql.ErrNoRows {
+			return slug, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		slug = fmt.Sprintf("%s-%d", base, i+2)
+	}
+	return "", fmt.Errorf("slug_exhausted")
+}
+
+func slugifyFacility(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 80 {
+		out = out[:80]
+		out = strings.Trim(out, "-")
+	}
+	return out
 }
 
 func (s *Service) SportsCatalog() map[string]interface{} {

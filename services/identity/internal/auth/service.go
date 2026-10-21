@@ -452,7 +452,10 @@ func (s *Service) PublicUser(u *User) map[string]interface{} {
 	}
 }
 
-func (s *Service) SessionPayload(u *User) (map[string]interface{}, []FacilityMembership, string, error) {
+// SessionPayload builds the live session map.
+// preferredFacilityID > 0 selects that membership for top-level role/page_access
+// (same email, different roles per facility). Otherwise first membership is used.
+func (s *Service) SessionPayload(u *User, preferredFacilityID int64) (map[string]interface{}, []FacilityMembership, string, error) {
 	memberships, err := s.LoadMemberships(u.ID)
 	if err != nil {
 		return nil, nil, "", err
@@ -468,11 +471,19 @@ func (s *Service) SessionPayload(u *User) (map[string]interface{}, []FacilityMem
 	out["facility_ids"] = ids
 	redirect := ""
 	if len(memberships) > 0 {
-		first := memberships[0]
-		out["role"] = first.Role
-		out["page_access"] = first.PageAccess
-		out["current_facility_id"] = first.FacilityID
-		redirect = FacilityHomePath(first)
+		current := memberships[0]
+		if preferredFacilityID > 0 {
+			for _, m := range memberships {
+				if m.FacilityID == preferredFacilityID {
+					current = m
+					break
+				}
+			}
+		}
+		out["role"] = current.Role
+		out["page_access"] = current.PageAccess
+		out["current_facility_id"] = current.FacilityID
+		redirect = FacilityHomePath(current)
 		out["redirect"] = redirect
 	} else {
 		out["role"] = ""
@@ -483,7 +494,7 @@ func (s *Service) SessionPayload(u *User) (map[string]interface{}, []FacilityMem
 }
 
 func (s *Service) issuePartnerTokenPair(u *User) (*TokenPair, error) {
-	userOut, memberships, redirect, err := s.SessionPayload(u)
+	userOut, memberships, redirect, err := s.SessionPayload(u, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +510,7 @@ func (s *Service) issuePartnerTokenPair(u *User) (*TokenPair, error) {
 }
 
 func (s *Service) issueTokenPair(u *User) (*TokenPair, error) {
-	userOut, memberships, redirect, err := s.SessionPayload(u)
+	userOut, memberships, redirect, err := s.SessionPayload(u, 0)
 	if err != nil {
 		return nil, err
 	}

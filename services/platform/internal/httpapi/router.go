@@ -23,13 +23,15 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/platform/health", s.handleHealth)
 
-	mux.HandleFunc("POST /v1/onboarding/status", s.withAuth(s.handleOnboardingStatus))
-	mux.HandleFunc("POST /v1/onboarding/draft/get", s.withAuth(s.handleDraftGet))
-	mux.HandleFunc("POST /v1/onboarding/draft/save", s.withAuth(s.handleDraftSave))
-	mux.HandleFunc("POST /v1/onboarding/submit_facility", s.withAuth(s.handleSubmitFacility))
-	mux.HandleFunc("POST /v1/onboarding/submit_tournament", s.withAuth(s.handleSubmitTournament))
-	mux.HandleFunc("POST /v1/onboarding/submit_referee", s.withAuth(s.handleSubmitReferee))
-	mux.HandleFunc("GET /v1/onboarding/sports", s.withAuth(s.handleSports))
+	// Onboarding is a pre-login funnel (WhatsApp OTP in the app). Do not require
+	// JWT/service-key — local already allowed via APP_ENV; production was 401.
+	mux.HandleFunc("POST /v1/onboarding/status", s.withOptionalAuth(s.handleOnboardingStatus))
+	mux.HandleFunc("POST /v1/onboarding/draft/get", s.withOptionalAuth(s.handleDraftGet))
+	mux.HandleFunc("POST /v1/onboarding/draft/save", s.withOptionalAuth(s.handleDraftSave))
+	mux.HandleFunc("POST /v1/onboarding/submit_facility", s.withOptionalAuth(s.handleSubmitFacility))
+	mux.HandleFunc("POST /v1/onboarding/submit_tournament", s.withOptionalAuth(s.handleSubmitTournament))
+	mux.HandleFunc("POST /v1/onboarding/submit_referee", s.withOptionalAuth(s.handleSubmitReferee))
+	mux.HandleFunc("GET /v1/onboarding/sports", s.withOptionalAuth(s.handleSports))
 
 	mux.HandleFunc("GET /v1/news", s.withAuth(s.handleNewsList))
 	mux.HandleFunc("POST /v1/news/save", s.withAuth(s.handleNewsSave))
@@ -40,7 +42,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /v1/controls/sync", s.withAuth(s.handleControlsSync))
 
-	mux.HandleFunc("POST /v1/privacy", s.withAuth(s.handlePrivacy))
+	// Privacy accept during onboarding may run before a stored JWT exists.
+	mux.HandleFunc("POST /v1/privacy", s.withOptionalAuth(s.handlePrivacy))
 
 	mux.HandleFunc("GET /v1/billing/entitlement", s.withAuth(s.handleBillingEntitlement))
 	mux.HandleFunc("GET /v1/billing/catalog", s.withAuth(s.handleBillingCatalog))
@@ -93,6 +96,18 @@ func (s *Server) withAuth(next func(http.ResponseWriter, *http.Request, *authCtx
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 			return
+		}
+		next(w, r, ac)
+	}
+}
+
+// withOptionalAuth parses Bearer/service-key when present, but never 401s.
+// Used for public onboarding (draft/submit/sports) before facility login.
+func (s *Server) withOptionalAuth(next func(http.ResponseWriter, *http.Request, *authCtx)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ac, err := s.authorize(r)
+		if err != nil {
+			ac = &authCtx{}
 		}
 		next(w, r, ac)
 	}

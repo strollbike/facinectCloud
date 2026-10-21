@@ -605,8 +605,18 @@ func (s *Service) notifyWhatsAppData(ctx context.Context, facilityID int64, phon
 	if data == nil {
 		data = map[string]interface{}{}
 	}
+	if _, ok := data["title"]; !ok {
+		data["title"] = "Tournament update"
+	}
+	if _, ok := data["body"]; !ok {
+		if msg, _ := data["message"].(string); strings.TrimSpace(msg) != "" {
+			data["body"] = msg
+		} else {
+			data["body"] = "You have a tournament update."
+		}
+	}
 	payload := map[string]interface{}{
-		"channel":     "whatsapp",
+		"channel":     "both", // WhatsApp + push
 		"facility_id": facilityID,
 		"template":    template,
 		"to":          map[string]string{"whatsapp": phone},
@@ -661,6 +671,8 @@ func (s *Service) notifyTournamentRegistrationConfirmation(ctx context.Context, 
 	}
 	amt := fmt.Sprintf("%.2f", amount)
 	_ = s.notifyWhatsAppData(ctx, tour.FacilityID, phone, "tournament_registration_confirmation", map[string]interface{}{
+		"title": "Tournament registration",
+		"body":  fmt.Sprintf("%s · %s · %s confirmed", tourName, cat, regCode),
 		"body_params": []string{
 			tourName, cat, regCode, amt, txn,
 		},

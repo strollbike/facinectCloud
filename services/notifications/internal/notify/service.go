@@ -115,35 +115,62 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 		if req.FacilityID != nil {
 			facilityID = *req.FacilityID
 		}
-		credsRow, err := s.ResolveWhatsAppCreds(ctx, facilityID)
-		if err != nil {
-			lastErr = err
-			status = "failed"
-		} else if facilityID > 0 && !credsRow.WhatsAppEnabled {
-			lastErr = fmt.Errorf("whatsapp_disabled_for_facility")
-			status = "failed"
+		// Fill WhatsApp from app_users when client only sent user_id.
+		if strings.TrimSpace(req.To.WhatsApp) == "" && req.To.UserID != nil && *req.To.UserID > 0 {
+			if phone := s.ResolvePhoneByUserID(ctx, *req.To.UserID); phone != "" {
+				req.To.WhatsApp = phone
+			}
+		}
+		waDigits := normalizePhone(req.To.WhatsApp)
+		if waDigits == "" {
+			// Channel both + user_id only → skip WhatsApp, still try push below.
+			if job.Channel == "both" {
+				providerRef = "wa_skip:no_phone"
+			} else {
+				lastErr = fmt.Errorf("whatsapp_required")
+				status = "failed"
+			}
 		} else {
-			ref, err := s.WA.Send(ctx, req, WhatsAppSendCreds{
-				AccessToken:   credsRow.ResolvedToken,
-				PhoneNumberID: credsRow.ResolvedPhoneID,
-			})
+			credsRow, err := s.ResolveWhatsAppCreds(ctx, facilityID)
 			if err != nil {
 				lastErr = err
 				status = "failed"
+			} else if facilityID > 0 && !credsRow.WhatsAppEnabled {
+				lastErr = fmt.Errorf("whatsapp_disabled_for_facility")
+				status = "failed"
 			} else {
-				providerRef = ref
-				if strings.HasPrefix(ref, "dry_run:") {
-					status = "dry_run"
+				ref, err := s.WA.Send(ctx, req, WhatsAppSendCreds{
+					AccessToken:   credsRow.ResolvedToken,
+					PhoneNumberID: credsRow.ResolvedPhoneID,
+				})
+				if err != nil {
+					lastErr = err
+					status = "failed"
+				} else {
+					providerRef = ref
+					if strings.HasPrefix(ref, "dry_run:") {
+						status = "dry_run"
+					}
 				}
 			}
 		}
 	}
 
 	if job.Channel == "push" || job.Channel == "both" {
-		// Facinect NotifyDispatch: phone → app_users.id when user_id omitted.
-		if (req.To.UserID == nil || *req.To.UserID <= 0) && strings.TrimSpace(req.To.WhatsApp) != "" {
-			if uid := s.ResolveUserIDByPhone(ctx, req.To.WhatsApp); uid > 0 {
-				req.To.UserID = &uid
+		waPhone := strings.TrimSpace(req.To.WhatsApp)
+		// Facinect NotifyDispatch: phone → app_users.id when user_id omitted
+		// OR when tokens missing for the given id (clients sometimes send
+		// synthetic / stale user_ids from booking views).
+		if waPhone != "" {
+			needPhoneResolve := req.To.UserID == nil || *req.To.UserID <= 0
+			if !needPhoneResolve && len(req.To.DeviceTokens) == 0 {
+				toks, _ := s.ResolveDeviceTokens(ctx, *req.To.UserID)
+				needPhoneResolve = len(toks) == 0
+			}
+			if needPhoneResolve {
+				if uid := s.ResolveUserIDByPhone(ctx, waPhone); uid > 0 {
+					req.To.UserID = &uid
+				}
 			}
 		}
 		pushErr := error(nil)
@@ -190,11 +217,13 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 			}
 		}
 		if pushErr != nil {
-			// Channel "both": keep WhatsApp success; only fail hard on push-only.
-			if job.Channel == "push" {
+			waSkipped := strings.Contains(providerRef, "wa_skip:")
+			// Push-only, or both with no WhatsApp attempt → push must succeed.
+			if job.Channel == "push" || waSkipped {
 				lastErr = pushErr
 				status = "failed"
 			} else if lastErr == nil && status == "sent" {
+				// WhatsApp already delivered — soft-skip missing FCM token.
 				if providerRef != "" {
 					providerRef = providerRef + ",push_skip:" + pushErr.Error()
 				} else {
@@ -204,6 +233,15 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 				lastErr = pushErr
 				status = "failed"
 			}
+		} else if job.Channel == "both" && status == "failed" {
+			// WhatsApp failed but push delivered — treat as sent with WA error retained.
+			status = "sent"
+			lastErr = nil
+			if providerRef != "" {
+				providerRef = providerRef + ",wa_failed"
+			} else {
+				providerRef = "wa_failed"
+			}
 		}
 	}
 
@@ -211,14 +249,35 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 	if lastErr != nil {
 		errText = lastErr.Error()
 	}
-	_, _ = s.DB.ExecContext(ctx, `
+	if _, err := s.DB.ExecContext(ctx, `
 UPDATE notification_jobs
 SET status=$2, provider_ref=$3, error_text=$4, updated_at=NOW()
-WHERE id=$1`, job.ID, status, nullStr(providerRef), nullStr(errText))
+WHERE id=$1`, job.ID, status, nullStr(providerRef), nullStr(errText)); err != nil {
+		// Still return in-memory outcome so clients don't see stale "processing".
+		job.Status = status
+		job.ProviderRef = providerRef
+		job.ErrorText = errText
+		return job, nil
+	}
 
 	_ = s.writeLog(ctx, job.ID, req, status)
 
-	return s.GetJob(ctx, job.ID)
+	out, err := s.GetJob(ctx, job.ID)
+	if err != nil || out == nil {
+		job.Status = status
+		job.ProviderRef = providerRef
+		job.ErrorText = errText
+		return job, nil
+	}
+	// Prefer final status we just wrote (avoid rare read-your-writes lag).
+	if strings.TrimSpace(out.Status) == "" ||
+		strings.EqualFold(out.Status, "processing") ||
+		strings.EqualFold(out.Status, "pending") {
+		out.Status = status
+		out.ProviderRef = providerRef
+		out.ErrorText = errText
+	}
+	return out, nil
 }
 
 func titleBodyFromData(req SendRequest) (string, string) {
@@ -240,20 +299,48 @@ func titleBodyFromData(req SendRequest) (string, string) {
 	return title, body
 }
 
+// ResolvePhoneByUserID returns WhatsApp/phone digits for an app user.
+func (s *Service) ResolvePhoneByUserID(ctx context.Context, userID int64) string {
+	if userID <= 0 {
+		return ""
+	}
+	var wa, phone string
+	err := s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(whatsapp_no,''), COALESCE(phone,'')
+FROM app_users WHERE id=$1 AND status='active'`, userID).Scan(&wa, &phone)
+	if err != nil {
+		return ""
+	}
+	if p := normalizePhone(wa); p != "" {
+		return p
+	}
+	return normalizePhone(phone)
+}
+
 // ResolveUserIDByPhone maps WhatsApp digits → app_users.id (Facinect users.userId).
+// Matches last 10 digits so 7708054914 and 917708054914 resolve the same user.
 func (s *Service) ResolveUserIDByPhone(ctx context.Context, phone string) int64 {
-	p := normalizePhone(phone)
+	p := digitsOnlyPhone(phone)
 	if len(p) < 10 {
 		return 0
 	}
+	last10 := p[len(p)-10:]
 	var id int64
 	err := s.DB.QueryRowContext(ctx, `
 SELECT id FROM app_users
 WHERE status='active'
-  AND regexp_replace(COALESCE(whatsapp_no,''), '\D', '', 'g') = $1
-LIMIT 1`, p).Scan(&id)
+  AND RIGHT(regexp_replace(COALESCE(whatsapp_no,''), '\D', '', 'g'), 10) = $1
+LIMIT 1`, last10).Scan(&id)
 	if err != nil {
-		return 0
+		// Also try phone column when whatsapp_no is empty/mismatched.
+		err = s.DB.QueryRowContext(ctx, `
+SELECT id FROM app_users
+WHERE status='active'
+  AND RIGHT(regexp_replace(COALESCE(phone,''), '\D', '', 'g'), 10) = $1
+LIMIT 1`, last10).Scan(&id)
+		if err != nil {
+			return 0
+		}
 	}
 	return id
 }
@@ -515,11 +602,22 @@ ORDER BY updated_at DESC`, userID)
 }
 
 func normalizePhone(p string) string {
-	p = strings.TrimSpace(p)
-	p = strings.ReplaceAll(p, " ", "")
-	p = strings.ReplaceAll(p, "+", "")
-	p = strings.ReplaceAll(p, "-", "")
-	return p
+	return digitsOnlyPhone(p)
+}
+
+// digitsOnlyPhone keeps digits only; prefixes 91 for bare 10-digit Indian mobiles.
+func digitsOnlyPhone(raw string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	d := b.String()
+	if len(d) == 10 {
+		d = "91" + d
+	}
+	return d
 }
 
 func nullStr(s string) interface{} {

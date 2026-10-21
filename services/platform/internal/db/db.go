@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS platform_onboarding_requests (
   email            VARCHAR(191) NULL,
   whatsapp_number  VARCHAR(64) NULL,
   payload          JSONB NOT NULL DEFAULT '{}'::jsonb,
-  status           VARCHAR(32) NOT NULL DEFAULT 'submitted',
+  status           VARCHAR(32) NOT NULL DEFAULT 'approved',
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_platform_onboarding_kind

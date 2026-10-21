@@ -35,6 +35,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/administration/facilities/{facilityId}/courts", s.withAuth(s.handleListCourts))
 	mux.HandleFunc("POST /v1/administration/facilities/{facilityId}/courts", s.withAuth(s.handleCreateCourt))
 	mux.HandleFunc("POST /v1/administration/facilities/{facilityId}/courts/{courtId}/status", s.withAuth(s.handleCourtStatus))
+	mux.HandleFunc("POST /v1/administration/facilities/{facilityId}/sync-sports", s.withAuth(s.handleSyncSports))
 
 	mux.HandleFunc("GET /v1/administration/facilities/{facilityId}/payment-settings", s.withAuth(s.handleListPayments))
 	mux.HandleFunc("PUT /v1/administration/facilities/{facilityId}/payment-settings", s.withAuth(s.handlePutPayment))
@@ -211,10 +212,22 @@ func (s *Server) handlePutProfile(w http.ResponseWriter, r *http.Request, ac *au
 	if !ok {
 		return
 	}
-	var in administration.Profile
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+	// Allow logoBase64 payloads (up to ~4MB).
+	var raw map[string]interface{}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 5<<20)).Decode(&raw); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
 		return
+	}
+	in := administration.Profile{}
+	b, _ := json.Marshal(raw)
+	_ = json.Unmarshal(b, &in)
+	// Optional client upload: logoBase64 (+ logoMime) → data URL stored in logo_url.
+	if b64, _ := raw["logoBase64"].(string); strings.TrimSpace(b64) != "" {
+		mime := "image/jpeg"
+		if m, _ := raw["logoMime"].(string); strings.TrimSpace(m) != "" {
+			mime = strings.TrimSpace(m)
+		}
+		in.LogoURL = "data:" + mime + ";base64," + strings.TrimSpace(b64)
 	}
 	p, err := s.Admin.UpsertProfile(r.Context(), fid, in)
 	if err != nil {
@@ -282,6 +295,32 @@ func (s *Server) handleSportStatus(w http.ResponseWriter, r *http.Request, ac *a
 		return
 	}
 	writeJSON(w, http.StatusOK, row)
+}
+
+func (s *Server) handleSyncSports(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, ok := s.facilityAuth(w, r, ac)
+	if !ok {
+		return
+	}
+	var in struct {
+		Sports []administration.SportCourtSyncIn `json:"sports"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	if err := s.Admin.SyncSportsCourts(r.Context(), fid, in.Sports); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	sports, _ := s.Admin.ListSports(r.Context(), fid, "active")
+	courts, _ := s.Admin.ListCourts(r.Context(), fid, "active")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":     true,
+		"sports": sports,
+		"courts": courts,
+		"message": "Sports/courts saved; booking courts synced and slots generated",
+	})
 }
 
 func (s *Server) handleListCourts(w http.ResponseWriter, r *http.Request, ac *authCtx) {

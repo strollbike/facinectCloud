@@ -54,6 +54,9 @@ func (p *PushClient) Send(ctx context.Context, req SendRequest) (string, error) 
 			body = b
 		}
 		for k, v := range req.Data {
+			if !fcmDataKeyAllowed(k) {
+				continue
+			}
 			stringData[k] = fmt.Sprint(v)
 		}
 	}
@@ -125,6 +128,19 @@ func (p *PushClient) sendV1(ctx context.Context, deviceToken, title, body string
 	if err != nil {
 		return fmt.Errorf("fcm_oauth: %w", err)
 	}
+	priority := "HIGH"
+	notifPriority := "PRIORITY_HIGH"
+	if data != nil && strings.EqualFold(strings.TrimSpace(data["android_priority"]), "normal") {
+		priority = "NORMAL"
+		notifPriority = "PRIORITY_DEFAULT"
+	}
+	if data != nil {
+		for k := range data {
+			if !fcmDataKeyAllowed(k) {
+				delete(data, k)
+			}
+		}
+	}
 	payload := map[string]interface{}{
 		"message": map[string]interface{}{
 			"token": deviceToken,
@@ -134,9 +150,10 @@ func (p *PushClient) sendV1(ctx context.Context, deviceToken, title, body string
 			},
 			"data": data,
 			"android": map[string]interface{}{
-				"priority": "high",
+				"priority": priority,
 				"notification": map[string]interface{}{
 					"channel_id":              androidChannelID(data),
+					"notification_priority":   notifPriority,
 					"default_sound":           true,
 					"default_vibrate_timings": true,
 				},
@@ -163,6 +180,19 @@ func (p *PushClient) sendV1(ctx context.Context, deviceToken, title, body string
 	return nil
 }
 
+// fcmDataKeyAllowed drops keys FCM rejects. message_type is reserved
+// (Notify/Coupon use it only to choose WhatsApp free text).
+func fcmDataKeyAllowed(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	if k == "" || k == "from" || k == "message_type" || k == "android_priority" {
+		return false
+	}
+	if strings.HasPrefix(k, "google") || strings.HasPrefix(k, "gcm") {
+		return false
+	}
+	return true
+}
+
 func androidChannelID(data map[string]string) string {
 	t := strings.ToLower(strings.TrimSpace(data["type"]))
 	if strings.HasPrefix(t, "booking") {
@@ -175,13 +205,20 @@ func androidChannelID(data map[string]string) string {
 }
 
 func (p *PushClient) sendLegacy(ctx context.Context, tokens []string, title, body string, data map[string]interface{}) (string, error) {
+	safe := map[string]string{}
+	for k, v := range data {
+		if !fcmDataKeyAllowed(k) {
+			continue
+		}
+		safe[k] = fmt.Sprint(v)
+	}
 	payload := map[string]interface{}{
 		"registration_ids": tokens,
 		"notification": map[string]string{
 			"title": title,
 			"body":  body,
 		},
-		"data": data,
+		"data": safe,
 	}
 	raw, _ := json.Marshal(payload)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://fcm.googleapis.com/fcm/send", bytes.NewReader(raw))

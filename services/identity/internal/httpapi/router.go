@@ -333,7 +333,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
-	session, _, redirect, err := s.Auth.SessionPayload(user)
+	session, _, redirect, err := s.Auth.SessionPayload(user, queryFacilityID(r))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "session_failed"})
 		return
@@ -353,13 +353,14 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSession mirrors Facinect api/v2/auth.php refresh_session — live membership from DB.
+// Optional ?facilityId= selects that facility's role/page_access for multi-facility staff.
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.userFromBearer(r)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
-	session, memberships, redirect, err := s.Auth.SessionPayload(user)
+	session, memberships, redirect, err := s.Auth.SessionPayload(user, queryFacilityID(r))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "session_failed"})
 		return
@@ -373,6 +374,21 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		"user":     session,
 		"redirect": redirect,
 	})
+}
+
+func queryFacilityID(r *http.Request) int64 {
+	raw := strings.TrimSpace(r.URL.Query().Get("facilityId"))
+	if raw == "" {
+		raw = strings.TrimSpace(r.URL.Query().Get("facility_id"))
+	}
+	if raw == "" {
+		return 0
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
 }
 
 func (s *Server) userFromBearer(r *http.Request) (*auth.User, map[string]interface{}, error) {

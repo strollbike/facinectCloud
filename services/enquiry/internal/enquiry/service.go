@@ -216,15 +216,18 @@ func (s *Service) Notify(ctx context.Context, facilityID int64, row *EnquiryRow,
 	}
 	payload := map[string]interface{}{
 		"facility_id": facilityID,
-		"channel":     "whatsapp",
+		"channel":     "both", // WhatsApp + push
 		"template":    "enquiry_response",
 		"to": map[string]string{
 			"whatsapp": row.CustomerPhone,
 		},
 		"data": map[string]interface{}{
+			"title":       "Enquiry reply",
 			"body":        message,
 			"text":        message,
+			"message":     message,
 			"body_params": []string{message},
+			"type":        "enquiry_response",
 		},
 	}
 	raw, _ := json.Marshal(payload)

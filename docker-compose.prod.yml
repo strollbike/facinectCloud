@@ -93,12 +93,18 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI}
       CORS_ORIGINS: ${CORS_ORIGINS:-https://cloud.facinect.com}
+      NOTIFICATIONS_BASE_URL: http://notifications:8080
+      NOTIFICATIONS_SERVICE_KEY: ${NOTIFICATIONS_SERVICE_KEY:-}
+      OTP_WHATSAPP_TEMPLATE: ${OTP_WHATSAPP_TEMPLATE:-facinect_otp}
+      OTP_DEV_INLINE: ${OTP_DEV_INLINE:-false}
     volumes:
       - ./keys:/keys:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      notifications:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/v1/auth/health | grep -q '\"status\":\"ok\"'"]
