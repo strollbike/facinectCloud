@@ -162,6 +162,11 @@ func resolveWhatsAppTemplate(name, lang string) (string, string) {
 			return name, "en"
 		}
 		return name, lang
+	case "onboarding_pending_review":
+		if lang == "" {
+			return name, "en"
+		}
+		return name, lang
 	default:
 		return name, lang
 	}
@@ -233,8 +238,39 @@ func buildTemplateComponents(req SendRequest) []interface{} {
 		})
 	}
 
+	// Several URL buttons. Index 0 is Approve, index 1 is View.
+	if raw, ok := req.Data["button_url_params"]; ok {
+		var parts []string
+		switch list := raw.(type) {
+		case []interface{}:
+			for _, item := range list {
+				s := strings.TrimSpace(fmt.Sprint(item))
+				if s != "" && s != "<nil>" {
+					parts = append(parts, s)
+				}
+			}
+		case []string:
+			for _, s := range list {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					parts = append(parts, s)
+				}
+			}
+		}
+		for i, part := range parts {
+			comps = append(comps, map[string]interface{}{
+				"type":     "button",
+				"sub_type": "url",
+				"index":    fmt.Sprintf("%d", i),
+				"parameters": []map[string]string{
+					{"type": "text", "text": part},
+				},
+			})
+		}
+	}
+
 	// URL button dynamic suffix (tournament_registration_*, payment_reminder_dns).
-	if urlParam := dataString(req.Data, "button_url_param", "url_button_param", "button_param"); urlParam != "" {
+	if urlParam := dataString(req.Data, "button_url_param", "url_button_param", "button_param"); urlParam != "" && req.Data["button_url_params"] == nil {
 		idx := dataString(req.Data, "button_url_index", "button_index")
 		if idx == "" {
 			idx = "0"

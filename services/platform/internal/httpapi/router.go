@@ -32,6 +32,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/onboarding/submit_tournament", s.withOptionalAuth(s.handleSubmitTournament))
 	mux.HandleFunc("POST /v1/onboarding/submit_referee", s.withOptionalAuth(s.handleSubmitReferee))
 	mux.HandleFunc("GET /v1/onboarding/sports", s.withOptionalAuth(s.handleSports))
+	mux.HandleFunc("GET /v1/onboarding/whatsapp/approve/{token}", s.handleOnboardingApproveLink)
+	mux.HandleFunc("GET /v1/onboarding/whatsapp/view/{token}", s.handleOnboardingViewLink)
 
 	mux.HandleFunc("GET /v1/news", s.withAuth(s.handleNewsList))
 	mux.HandleFunc("POST /v1/news/save", s.withAuth(s.handleNewsSave))
@@ -254,6 +256,24 @@ func (s *Server) handleSubmitReferee(w http.ResponseWriter, r *http.Request, ac 
 
 func (s *Server) handleSports(w http.ResponseWriter, r *http.Request, ac *authCtx) {
 	writeJSON(w, http.StatusOK, s.Platform.SportsCatalog())
+}
+
+func (s *Server) handleOnboardingApproveLink(w http.ResponseWriter, r *http.Request) {
+	page, status := s.Platform.ApproveOnboardingLink(r.Context(), r.PathValue("token"))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(page))
+}
+
+func (s *Server) handleOnboardingViewLink(w http.ResponseWriter, r *http.Request) {
+	target, err := s.Platform.ViewOnboardingLink(r.PathValue("token"))
+	if err != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`<!doctype html><html><body><p>This view link is not valid.</p></body></html>`))
+		return
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func (s *Server) handleNewsList(w http.ResponseWriter, r *http.Request, ac *authCtx) {

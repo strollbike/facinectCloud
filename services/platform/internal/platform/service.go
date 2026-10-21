@@ -348,7 +348,7 @@ func (s *Service) SubmitOnboarding(ctx context.Context, kind string, in SubmitIn
 	var id int64
 	err := s.DB.QueryRowContext(ctx, `
 INSERT INTO platform_onboarding_requests (kind, email, whatsapp_number, payload, status)
-VALUES ($1, NULLIF($2,''), NULLIF($3,''), $4::jsonb, 'approved')
+VALUES ($1, NULLIF($2,''), NULLIF($3,''), $4::jsonb, 'pending')
 RETURNING id`,
 		kind,
 		email,
@@ -358,29 +358,15 @@ RETURNING id`,
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]interface{}{
-		"id":       id,
-		"kind":     kind,
-		"status":   "approved",
-		"isActive": 1,
-	}
-	// Fresh onboarding defaults to approved: provision facility so Google login works.
-	if kind == "facility" {
-		if fid, uid, perr := s.provisionApprovedFacility(ctx, email, wa, payloadMap); perr != nil {
-			return map[string]interface{}{
-				"success": false,
-				"error":   "provision_failed",
-				"message": perr.Error(),
-				"data":    out,
-			}, perr
-		} else {
-			out["facilityId"] = fid
-			out["userId"] = uid
-		}
-	}
+	s.notifyOnboardingPending(ctx, id, kind, email, wa, payloadMap)
 	return map[string]interface{}{
 		"success": true,
-		"data":    out,
+		"data": map[string]interface{}{
+			"id":       id,
+			"kind":     kind,
+			"status":   "pending",
+			"isActive": 0,
+		},
 	}, nil
 }
 

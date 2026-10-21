@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS platform_onboarding_requests (
 CREATE INDEX IF NOT EXISTS idx_platform_onboarding_kind
   ON platform_onboarding_requests(kind, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS platform_alert_contacts (
+  id          BIGSERIAL PRIMARY KEY,
+  purpose     VARCHAR(64) NOT NULL DEFAULT 'onboarding_pending',
+  whatsapp    VARCHAR(32) NOT NULL,
+  active      BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (purpose, whatsapp)
+);
+
 CREATE TABLE IF NOT EXISTS platform_onboarding_drafts (
   id               BIGSERIAL PRIMARY KEY,
   email            VARCHAR(191) NOT NULL,
