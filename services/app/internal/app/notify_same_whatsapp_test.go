@@ -103,7 +103,7 @@ VALUES ($1, 'WA Same Number Test', $2, $2)`, facilityID, phone)
 	svc.notifyBookingConfirmation(ctx, userID, facilityID, bookingID, slots, "advance", "TXN_TEST", 100, 0, 100, 0)
 
 	afterConfirm := snapshot(&mu, &got)
-	confirm := whatsappSends(afterConfirm)
+	confirm := whatsappTo(whatsappSends(afterConfirm), phone)
 	if len(confirm) != 2 {
 		t.Fatalf("confirm whatsapp sends = %d, want 2 (end user and facility)", len(confirm))
 	}
@@ -120,7 +120,7 @@ VALUES ($1, 'WA Same Number Test', $2, $2)`, facilityID, phone)
 	svc.notifyBookingCancelled(ctx, userID, facilityID, bookingID, "WA Same Number Test", slotsJSON, "", 0)
 
 	all := snapshot(&mu, &got)
-	cancel := whatsappSends(all[len(afterConfirm):])
+	cancel := whatsappTo(whatsappSends(all[len(afterConfirm):]), phone)
 	if len(cancel) != 2 {
 		t.Fatalf("cancel whatsapp sends = %d, want 2 (end user and facility)", len(cancel))
 	}
@@ -144,6 +144,16 @@ func snapshot(mu *sync.Mutex, got *[]map[string]any) []map[string]any {
 	defer mu.Unlock()
 	out := make([]map[string]any, len(*got))
 	copy(out, *got)
+	return out
+}
+
+func whatsappTo(bodies []map[string]any, phone string) []map[string]any {
+	out := make([]map[string]any, 0, len(bodies))
+	for _, body := range bodies {
+		if phoneOf(body) == phone {
+			out = append(out, body)
+		}
+	}
 	return out
 }
 

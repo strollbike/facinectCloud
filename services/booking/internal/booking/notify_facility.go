@@ -72,6 +72,7 @@ func (s *Service) notifyFacilityBooking(ctx context.Context, b *Booking, cancell
 	} else if err := s.sendFacilityTemplate(ctx, b.FacilityID, phone, template, title, params); err != nil {
 		log.Printf("facility booking WA: booking=%d template=%s err=%v", b.ID, template, err)
 	}
+	s.notifyFacilityStaffWhatsApp(ctx, b.FacilityID, template, title, params)
 	pushBody := fmt.Sprintf("%s · %s · %s · %s", name, court, dateStr, timeStr)
 	s.notifyFacilityStaffPush(ctx, b.FacilityID, title, pushBody, b.ID)
 }
@@ -147,6 +148,41 @@ func (s *Service) sendStaffPush(ctx context.Context, facilityID, userID int64, t
 		return fmt.Errorf("notify_http_%d %s", res.StatusCode, strings.TrimSpace(string(resp)))
 	}
 	return nil
+}
+
+func (s *Service) notifyFacilityStaffWhatsApp(ctx context.Context, facilityID int64, template, title string, bodyParams []string) {
+	if facilityID <= 0 {
+		return
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT DISTINCT COALESCE(u.phone_e164, '')
+FROM user_facility_memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.facility_id=$1 AND m.status='active' AND u.status='active'
+  AND lower(replace(replace(m.role, ' ', '_'), '-', '_')) IN ('admin', 'sub_admin', 'subadmin')`, facilityID)
+	if err != nil {
+		log.Printf("facility staff WA: facility=%d err=%v", facilityID, err)
+		return
+	}
+	defer rows.Close()
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var phone string
+		if rows.Scan(&phone) != nil {
+			continue
+		}
+		phone = normalizeWhatsApp(phone)
+		if phone == "" {
+			continue
+		}
+		if _, ok := seen[phone]; ok {
+			continue
+		}
+		seen[phone] = struct{}{}
+		if err := s.sendFacilityTemplate(ctx, facilityID, phone, template, title, bodyParams); err != nil {
+			log.Printf("facility staff WA: facility=%d template=%s err=%v", facilityID, template, err)
+		}
+	}
 }
 
 func (s *Service) facilityAlertWhatsApp(ctx context.Context, facilityID int64) (string, string) {

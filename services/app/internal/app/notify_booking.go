@@ -98,6 +98,7 @@ func (s *Service) notifyBookingConfirmation(
 		log.Printf("booking notify WA: booking=%d err=%v", bookingID, err)
 	}
 	s.notifyFacilityBookingWhatsApp(ctx, facilityID, userID, "booking_confirmation", title, params)
+	s.notifyFacilityStaffWhatsApp(ctx, facilityID, "booking_confirmation", title, params)
 }
 
 type bookingSlotParts struct {
@@ -311,6 +312,43 @@ WHERE m.facility_id=$1 AND m.status='active' AND m.user_id>0
 		seen[staffID] = struct{}{}
 		if err := s.notifyStaffPush(ctx, facilityID, staffID, title, body, bookingID); err != nil {
 			log.Printf("facility staff push: facility=%d user=%d err=%v", facilityID, staffID, err)
+		}
+	}
+}
+
+// notifyFacilityStaffWhatsApp sends the booking template to each admin and
+// subadmin phone. The StrollX inbox row is the push above; this is WhatsApp only.
+func (s *Service) notifyFacilityStaffWhatsApp(ctx context.Context, facilityID int64, template, title string, bodyParams []string) {
+	if facilityID <= 0 {
+		return
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT DISTINCT COALESCE(u.phone_e164, '')
+FROM user_facility_memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.facility_id=$1 AND m.status='active' AND u.status='active'
+  AND lower(replace(replace(m.role, ' ', '_'), '-', '_')) IN ('admin', 'sub_admin', 'subadmin')`, facilityID)
+	if err != nil {
+		log.Printf("facility staff WA: facility=%d err=%v", facilityID, err)
+		return
+	}
+	defer rows.Close()
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var phone string
+		if rows.Scan(&phone) != nil {
+			continue
+		}
+		phone = normalizeWA(phone)
+		if phone == "" {
+			continue
+		}
+		if _, ok := seen[phone]; ok {
+			continue
+		}
+		seen[phone] = struct{}{}
+		if err := s.notifyBookingWhatsAppTemplate(ctx, facilityID, 0, phone, template, title, bodyParams); err != nil {
+			log.Printf("facility staff WA: facility=%d template=%s err=%v", facilityID, template, err)
 		}
 	}
 }
