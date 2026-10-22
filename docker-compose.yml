@@ -142,6 +142,9 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       NOTIFICATIONS_SERVICE_KEY: ${NOTIFICATIONS_SERVICE_KEY:-}
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
+      JWT_ISSUER: ${JWT_ISSUER}
+      JWT_AUDIENCE: ${JWT_AUDIENCE}
       NOTIFICATIONS_DRY_RUN: ${NOTIFICATIONS_DRY_RUN:-false}
       META_WHATSAPP_TOKEN: ${META_WHATSAPP_TOKEN:-}
       META_PHONE_NUMBER_ID: ${META_PHONE_NUMBER_ID:-}
@@ -151,6 +154,7 @@ services:
       FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
       CORS_ORIGINS: "*"
     volumes:
+      - ./keys:/keys:ro
       - ./secrets/fcm_service_account.json:/secrets/fcm_service_account.json:ro
     depends_on:
       postgres:

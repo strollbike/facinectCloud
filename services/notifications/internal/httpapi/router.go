@@ -1,19 +1,23 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/facinect/notifications/internal/authn"
 	"github.com/facinect/notifications/internal/config"
 	"github.com/facinect/notifications/internal/notify"
 )
 
 type Server struct {
-	Cfg    config.Config
-	Notify *notify.Service
+	Cfg        config.Config
+	Notify     *notify.Service
+	JWT        *authn.Verifier
+	lookupRole func(ctx context.Context, userID, facilityID int64) (string, error)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -21,7 +25,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/notifications/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/notifications/openapi.json", s.handleOpenAPI)
 	mux.HandleFunc("POST /v1/notifications/send", s.withAuth(s.handleSend))
-	mux.HandleFunc("POST /v1/notifications/send-bulk", s.withAuth(s.handleSendBulk))
+	mux.HandleFunc("POST /v1/notifications/send-bulk", s.withSendBulkAuth(s.handleSendBulk))
 	mux.HandleFunc("POST /v1/notifications/service-broadcast", s.withAuth(s.handleServiceBroadcast))
 	mux.HandleFunc("GET /v1/notifications/service-broadcasts", s.withAuth(s.handleListServiceBroadcasts))
 	mux.HandleFunc("GET /v1/notifications/facilities/{facilityId}/whatsapp", s.withAuth(s.handleGetFacilityWA))

@@ -18,6 +18,9 @@ type Config struct {
 	RedisPort          string
 	ServiceKey         string
 	CORSOrigins        string
+	JWTPublicKeyPath   string
+	JWTIssuer          string
+	JWTAudience        string
 	MetaWhatsAppToken      string
 	MetaPhoneNumberID      string
 	MetaAPIVersion         string
@@ -46,6 +49,9 @@ func FromEnv() Config {
 		RedisPort:         getenv("REDIS_PORT", "6379"),
 		ServiceKey:        strings.TrimSpace(os.Getenv("NOTIFICATIONS_SERVICE_KEY")),
 		CORSOrigins:       getenv("CORS_ORIGINS", "*"),
+		JWTPublicKeyPath:  getenv("JWT_PUBLIC_KEY_PATH", "/keys/jwt_public.pem"),
+		JWTIssuer:         getenv("JWT_ISSUER", "https://api.facinect.local"),
+		JWTAudience:       getenv("JWT_AUDIENCE", "facinect-apps"),
 		MetaWhatsAppToken:     strings.TrimSpace(os.Getenv("META_WHATSAPP_TOKEN")),
 		MetaPhoneNumberID:     strings.TrimSpace(os.Getenv("META_PHONE_NUMBER_ID")),
 		MetaAPIVersion:        getenv("META_API_VERSION", "v21.0"),
