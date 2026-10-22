@@ -31,11 +31,11 @@ func utcISO(t time.Time) string {
 }
 
 type bookingSlotMeta struct {
-	Start       time.Time
-	Courts      string
+	Start         time.Time
+	Courts        string
 	FormattedDate string
 	FormattedTime string
-	TimesJoined string
+	TimesJoined   string
 }
 
 // bookingMetaFromSlots derives display fields + earliest slot start (PHP bookingTime).
@@ -304,12 +304,11 @@ WHERE facility_id=$1 AND ($2=0 OR sport_id=$2)
 
 func (s *Service) notifyBookingCancelled(
 	ctx context.Context,
-	userID, facilityID, sportID, bookingID int64,
+	userID, facilityID, bookingID int64,
 	facilityName string,
 	slotsJSON []byte,
 	refundCoupon string,
 	refundAmount float64,
-	isRegOffer bool,
 ) {
 	title := "Booking cancelled"
 	body := strings.TrimSpace(facilityName) + " — booking #" + strconv.FormatInt(bookingID, 10) + " cancelled"
@@ -352,34 +351,11 @@ VALUES ($1,$2,$3,'booking_cancelled',$4,$5,'booking',$6::jsonb)`,
 		log.Printf("booking cancel WA skipped: booking=%d no phone", bookingID)
 	}
 
-	sportName := "Sport"
-	if sportID > 0 {
-		_ = s.DB.QueryRowContext(ctx, `SELECT COALESCE(name,'Sport') FROM app_sports WHERE id=$1`, sportID).Scan(&sportName)
-		sportName = strings.TrimSpace(sportName)
-		if sportName == "" {
-			sportName = "Sport"
-		}
-	}
-
 	var slots []any
 	_ = json.Unmarshal(slotsJSON, &slots)
 	parsed := parseBookingSlots(slots)
-	dateStr, timeStr := "—", "—"
-	if len(parsed) > 0 {
-		dateStr = formatCancelDateLong(parsed[0].date)
-		times := make([]string, 0, len(parsed))
-		for _, p := range parsed {
-			times = append(times, p.time)
-		}
-		timeStr = strings.Join(times, ", ")
-	}
 
-	// PHP my_bookings.php free-form cancellation notice (not Meta template).
-	msg := buildCancelWhatsAppMessage(bid, sportName, dateStr, timeStr, refundCoupon, isRegOffer)
-	tmpl := strings.TrimSpace(s.Cfg.BookingCancelWhatsAppTemplate)
-	if tmpl == "" {
-		tmpl = "booking_cancellation"
-	}
+	tmpl := "booking_cancellation"
 	uName := "Customer"
 	if u != nil {
 		if v := strings.TrimSpace(fmt.Sprint(u["fullName"])); v != "" && v != "<nil>" {
@@ -409,49 +385,17 @@ VALUES ($1,$2,$3,'booking_cancelled',$4,$5,'booking',$6::jsonb)`,
 		bodyParams = []string{uName, "🧾 " + bid, "📍 " + fName, "🏟️ Court", "🗓️ —", tail}
 	}
 	if uPhone != "" {
-		if err := s.notifyBookingWhatsAppText(ctx, facilityID, userID, uPhone, title, msg); err != nil {
-			log.Printf("booking cancel WA text: booking=%d err=%v — falling back to template", bookingID, err)
-			if err2 := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, uPhone, tmpl, title, bodyParams); err2 != nil {
-				log.Printf("booking cancel WA template: booking=%d err=%v", bookingID, err2)
-			}
+		if err := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, uPhone, tmpl, title, bodyParams); err != nil {
+			log.Printf("booking cancel WA template: booking=%d err=%v", bookingID, err)
 		}
 	}
 	facPhone := s.facilityWhatsApp(ctx, facilityID)
-	if facPhone == "" || sameWhatsApp(facPhone, uPhone) {
+	if facPhone == "" {
 		return
 	}
-	if err := s.notifyBookingWhatsAppText(ctx, facilityID, 0, facPhone, title, msg); err != nil {
-		log.Printf("facility cancel WA text: booking=%d err=%v — falling back to template", bookingID, err)
-		if err2 := s.notifyBookingWhatsAppTemplate(ctx, facilityID, 0, facPhone, tmpl, title, bodyParams); err2 != nil {
-			log.Printf("facility cancel WA template: booking=%d err=%v", bookingID, err2)
-		}
+	if err := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, facPhone, tmpl, title, bodyParams); err != nil {
+		log.Printf("facility cancel WA template: booking=%d err=%v", bookingID, err)
 	}
-}
-
-func buildCancelWhatsAppMessage(bookingID, sportName, dateStr, timeStr, refundCoupon string, isRegOffer bool) string {
-	var b strings.Builder
-	b.WriteString("🔔 *Booking Cancellation Notice*\n\n")
-	b.WriteString("Your booking has been successfully cancelled.\n\n")
-	b.WriteString("───────────────────\n")
-	b.WriteString("🧾 *Booking ID:* #" + bookingID + "\n")
-	b.WriteString("🏆 *Sport:* " + sportName + "\n")
-	b.WriteString("📅 *Date:* " + dateStr + "\n")
-	b.WriteString("⏰ *Time:* " + timeStr + "\n")
-	b.WriteString("───────────────────")
-	if refundCoupon != "" {
-		b.WriteString("\n\n🎟️ *Refund Coupon:*\n```" + refundCoupon + "```")
-	} else if isRegOffer {
-		b.WriteString("\n\n⚠️ *Note:* This booking was made using a special offer, so no refund coupon is issued.")
-	}
-	return b.String()
-}
-
-func formatCancelDateLong(raw string) string {
-	t, ok := parseSlotDate(raw)
-	if !ok {
-		return raw
-	}
-	return t.Format("Mon, 02 Jan 2006")
 }
 
 func sortBookingsByStart(items []map[string]any, ascending bool) {
