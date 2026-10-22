@@ -390,12 +390,12 @@ VALUES ($1,$2,$3,'booking_cancelled',$4,$5,'booking',$6::jsonb)`,
 		}
 	}
 	facPhone := s.facilityWhatsApp(ctx, facilityID)
-	if facPhone == "" {
-		return
+	if facPhone != "" {
+		if err := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, facPhone, tmpl, title, bodyParams); err != nil {
+			log.Printf("facility cancel WA template: booking=%d err=%v", bookingID, err)
+		}
 	}
-	if err := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, facPhone, tmpl, title, bodyParams); err != nil {
-		log.Printf("facility cancel WA template: booking=%d err=%v", bookingID, err)
-	}
+	s.notifyFacilityStaffWhatsApp(ctx, facilityID, tmpl, title, bodyParams)
 }
 
 func sortBookingsByStart(items []map[string]any, ascending bool) {
