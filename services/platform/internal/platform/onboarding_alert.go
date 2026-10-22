@@ -127,45 +127,149 @@ FROM platform_onboarding_requests WHERE id=$1`, id).Scan(&kind, &email, &wa, &st
 	if err != nil {
 		return onboardingPage("Could not approve", "Try again from the management page."), http.StatusInternalServerError
 	}
+	if err := s.approveOnboardingID(ctx, id, kind, email, wa, status, payload); err != nil {
+		if err.Error() == "already_approved" {
+			return "", http.StatusOK
+		}
+		log.Printf("onboarding approve %d: %v", id, err)
+		return onboardingPage("Could not approve", err.Error()), http.StatusInternalServerError
+	}
+	return "", http.StatusOK
+}
+
+func (s *Service) approveOnboardingID(ctx context.Context, id int64, kind, email, wa, status string, payload []byte) error {
 	if strings.EqualFold(status, "approved") {
-		return onboardingPage("Already approved", "This request was already approved."), http.StatusOK
+		return fmt.Errorf("already_approved")
 	}
 	res, err := s.DB.ExecContext(ctx, `
 UPDATE platform_onboarding_requests SET status='approved' WHERE id=$1 AND status<>'approved'`, id)
 	if err != nil {
-		return onboardingPage("Could not approve", "Try again from the management page."), http.StatusInternalServerError
+		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return onboardingPage("Already approved", "This request was already approved."), http.StatusOK
+		return fmt.Errorf("already_approved")
 	}
 	if strings.EqualFold(kind, "facility") {
 		var payloadMap map[string]interface{}
 		_ = json.Unmarshal(payload, &payloadMap)
 		if _, _, perr := s.provisionApprovedFacility(ctx, email, wa, payloadMap); perr != nil {
-			log.Printf("onboarding approve provision %d: %v", id, perr)
-			return onboardingPage("Approved with a warning", "The request is approved. Facility setup needs a check: "+perr.Error()), http.StatusOK
+			return fmt.Errorf("approved, facility setup needs a check: %s", perr.Error())
 		}
 	}
-	return onboardingPage("Approved", fmt.Sprintf("%s request %d is approved.", kind, id)), http.StatusOK
+	return nil
 }
 
-// ViewOnboardingLink decrypts the View button and returns the management page URL.
+// ApproveOnboardingID approves one request from the management page.
+func (s *Service) ApproveOnboardingID(ctx context.Context, id int64) error {
+	var kind, email, wa, status string
+	var payload []byte
+	err := s.DB.QueryRowContext(ctx, `
+SELECT kind, COALESCE(email,''), COALESCE(whatsapp_number,''), status, payload
+FROM platform_onboarding_requests WHERE id=$1`, id).Scan(&kind, &email, &wa, &status, &payload)
+	if err != nil {
+		return err
+	}
+	err = s.approveOnboardingID(ctx, id, kind, email, wa, status, payload)
+	if err != nil && err.Error() == "already_approved" {
+		return nil
+	}
+	return err
+}
+
+// OnboardingManagePage renders every facility, tournament, and referee request.
+func (s *Service) OnboardingManagePage(ctx context.Context, focus int64, notice string) (string, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT id, kind, COALESCE(email,''), COALESCE(whatsapp_number,''), status,
+       COALESCE(payload,'{}'::jsonb), to_char(created_at, 'YYYY-MM-DD HH24:MI')
+FROM platform_onboarding_requests
+ORDER BY id DESC
+LIMIT 300`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var body strings.Builder
+	count := 0
+	for rows.Next() {
+		var id int64
+		var kind, email, wa, status, created string
+		var payload []byte
+		if err := rows.Scan(&id, &kind, &email, &wa, &status, &payload, &created); err != nil {
+			return "", err
+		}
+		var payloadMap map[string]interface{}
+		_ = json.Unmarshal(payload, &payloadMap)
+		name := onboardingDisplayName(kind, payloadMap)
+		if name == "" {
+			name = "-"
+		}
+		count++
+		rowClass := "row"
+		if focus > 0 && id == focus {
+			rowClass = "row focus"
+		}
+		approve := ""
+		if !strings.EqualFold(status, "approved") {
+			approve = fmt.Sprintf(`<form method="post" action="/v1/onboarding/manage/approve"><input type="hidden" name="id" value="%d"><button type="submit">Approve</button></form>`, id)
+		}
+		fmt.Fprintf(&body, `<tr class="%s"><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><span class="st %s">%s</span></td><td>%s</td><td>%s</td></tr>`,
+			rowClass, id, htmlEscape(titleKind(kind)), htmlEscape(name), htmlEscape(wa), htmlEscape(email),
+			htmlEscape(strings.ToLower(status)), htmlEscape(status), htmlEscape(created), approve)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	note := ""
+	if strings.TrimSpace(notice) != "" {
+		note = `<p class="note">` + htmlEscape(notice) + `</p>`
+	}
+	empty := ""
+	if count == 0 {
+		empty = `<p class="empty">No onboarding requests yet.</p>`
+	}
+	return fmt.Sprintf(`<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Onboarding management</title>
+<style>
+body{font-family:sans-serif;margin:0;background:#f6f7fb;color:#14213d}
+header{padding:20px 16px 8px} h1{margin:0;font-size:22px}
+.note{margin:12px 16px;padding:10px 12px;background:#ecfdf5;border-radius:10px}
+.wrap{overflow:auto;padding:8px 16px 28px}
+table{width:100%%;border-collapse:collapse;background:#fff;border-radius:12px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e8ecf4;font-size:14px;vertical-align:top}
+th{font-size:12px;color:#64748b;text-transform:uppercase}
+tr.focus{background:#eff6ff}
+.st{padding:2px 8px;border-radius:999px;background:#fef3c7;color:#92400e;font-weight:700;font-size:12px}
+.st.approved{background:#dcfce7;color:#166534}
+.st.rejected{background:#fee2e2;color:#991b1b}
+button{background:#16a34a;color:#fff;border:0;border-radius:8px;padding:8px 12px;font-weight:700}
+.empty{padding:16px;color:#64748b}
+</style></head><body>
+<header><h1>Onboarding</h1><p>%d request(s)</p></header>
+%s
+<div class="wrap">%s<table><thead><tr><th>ID</th><th>Type</th><th>Name</th><th>WhatsApp</th><th>Email</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>%s</tbody></table></div>
+</body></html>`, count, note, empty, body.String()), nil
+}
+
+func titleKind(kind string) string {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return "-"
+	}
+	return strings.ToUpper(kind[:1]) + kind[1:]
+}
+
+// ViewOnboardingLink decrypts the View button and returns the in-service management page.
 func (s *Service) ViewOnboardingLink(token string) (string, error) {
 	values, err := s.decryptOnboardingLink(token)
 	if err != nil || values.Get("action") != "view" {
 		return "", fmt.Errorf("invalid_link")
 	}
-	kind := strings.ToLower(strings.TrimSpace(values.Get("kind")))
-	switch kind {
-	case "facility":
-		return "https://facinect.com/Services/Facinect/strollusers/facility_onboarding.php", nil
-	case "tournament":
-		return "https://facinect.com/Services/Facinect/strollusers/tournament_onboarding.php", nil
-	case "referee":
-		return "https://facinect.com/Services/Facinect/strollusers/referee_onboarding.php", nil
-	default:
-		return "", fmt.Errorf("invalid_kind")
+	id, err := parsePositiveID(values.Get("id"))
+	if err != nil {
+		return "", fmt.Errorf("invalid_link")
 	}
+	return fmt.Sprintf("/v1/onboarding/manage?focus=%d", id), nil
 }
 
 func onboardingDisplayName(kind string, payload map[string]interface{}) string {

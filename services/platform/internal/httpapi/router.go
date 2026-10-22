@@ -3,8 +3,10 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -32,6 +34,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/onboarding/submit_tournament", s.withOptionalAuth(s.handleSubmitTournament))
 	mux.HandleFunc("POST /v1/onboarding/submit_referee", s.withOptionalAuth(s.handleSubmitReferee))
 	mux.HandleFunc("GET /v1/onboarding/sports", s.withOptionalAuth(s.handleSports))
+	mux.HandleFunc("GET /v1/onboarding/manage", s.handleOnboardingManage)
+	mux.HandleFunc("POST /v1/onboarding/manage/approve", s.handleOnboardingManageApprove)
 	mux.HandleFunc("GET /v1/onboarding/whatsapp/approve/{token}", s.handleOnboardingApproveLink)
 	mux.HandleFunc("GET /v1/onboarding/whatsapp/view/{token}", s.handleOnboardingViewLink)
 
@@ -258,8 +262,36 @@ func (s *Server) handleSports(w http.ResponseWriter, r *http.Request, ac *authCt
 	writeJSON(w, http.StatusOK, s.Platform.SportsCatalog())
 }
 
+func (s *Server) handleOnboardingManage(w http.ResponseWriter, r *http.Request) {
+	focus, _ := strconv.ParseInt(r.URL.Query().Get("focus"), 10, 64)
+	page, err := s.Platform.OnboardingManagePage(r.Context(), focus, r.URL.Query().Get("notice"))
+	if err != nil {
+		http.Error(w, "Could not load onboarding requests.", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(page))
+}
+
+func (s *Server) handleOnboardingManageApprove(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/v1/onboarding/manage?notice=Invalid+request", http.StatusSeeOther)
+		return
+	}
+	id, _ := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	notice := "Approved"
+	if err := s.Platform.ApproveOnboardingID(r.Context(), id); err != nil {
+		notice = err.Error()
+	}
+	http.Redirect(w, r, fmt.Sprintf("/v1/onboarding/manage?focus=%d&notice=%s", id, url.QueryEscape(notice)), http.StatusSeeOther)
+}
+
 func (s *Server) handleOnboardingApproveLink(w http.ResponseWriter, r *http.Request) {
 	page, status := s.Platform.ApproveOnboardingLink(r.Context(), r.PathValue("token"))
+	if page == "" && status < 400 {
+		http.Redirect(w, r, "/v1/onboarding/manage?notice=Approved", http.StatusSeeOther)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(page))
