@@ -77,10 +77,10 @@ func (s *Service) parseIDs(raw any) []int64 {
 
 func (s *Service) userRow(ctx context.Context, id int64, wa string) (map[string]any, error) {
 	var (
-		uid                 int64
-		name, whatsapp, ph  string
-		email               string
-		accessed            []int64
+		uid                int64
+		name, whatsapp, ph string
+		email              string
+		accessed           []int64
 	)
 	q := `SELECT id, full_name, whatsapp_no, phone, email, COALESCE(accessed_facility_ids, '{}')::text
 FROM app_users WHERE status='active' AND `
@@ -754,6 +754,7 @@ WHERE facility_id=$1 AND ($2=0 OR sport_id=$2)
   AND court_name=$3 AND slot_date=$4::date AND time_range=$5`,
 			fid, sport, court, date, tr)
 	}
+	s.mirrorAppBookingToLedger(ctx, fid, sid, uid, bid, price, "spot", slotsRaw)
 	_, _, _ = s.UsersLookup(ctx, map[string]any{"action": "add_facility_access", "userId": uid, "facilityId": fid})
 	return true, "Booked", map[string]any{"bookingId": bid}
 }
@@ -1121,6 +1122,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13) RETURNING id`,
 			return false, err.Error(), nil, 400
 		}
 		s.markSlotsBookedFromKeys(ctx, fid, sportID, slots)
+		s.mirrorAppBookingToLedger(ctx, fid, sportID, uid, bid, paid, mode, slots)
 		s.consumeCheckoutCoupon(ctx, fid, uid, q, bid)
 		ok, _, access := s.UsersLookup(ctx, map[string]any{"action": "add_facility_access", "userId": uid, "facilityId": fid})
 		accessed := []int64{}
@@ -1134,7 +1136,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13) RETURNING id`,
 		return true, "Confirmed", map[string]any{
 			"bookingId": bid, "transactionId": txn, "facilityId": fid,
 			"accessedFacilityIds": accessed,
-			"finalAmount": paid, "totalBill": q.TotalBill,
+			"finalAmount":         paid, "totalBill": q.TotalBill,
 			"balanceDue": q.BalanceDue, "paymentMode": mode, "discount": q.Discount,
 		}, 200
 	default:
@@ -1440,6 +1442,7 @@ WHERE id=$1 AND user_id=$2 AND status='confirmed'`, bid, uid)
 			return false, "Cancellation failed.", nil
 		}
 		s.releaseBookingSlots(ctx, facilityID, sportID, slotsJSON)
+		s.cancelLedgerForAppBooking(ctx, facilityID, bid)
 		// Spot / free → no refund coupon (PHP: transaction_amount > 0 only).
 		if strings.EqualFold(payMode, "spot") || strings.EqualFold(payMode, "free") {
 			paidAmount = 0
@@ -1906,8 +1909,8 @@ FROM tournament_fixtures WHERE id=$1`, mid).Scan(&fs1, &fs2, &st)
 				if err2 == nil {
 					return true, "OK", map[string]any{
 						"changed": true, "version": mid, "matchId": mid, "score1": fs1, "score2": fs2,
-						"status": mapFixtureStatus(st),
-						"events": []map[string]any{{"matchId": mid, "score1": fs1, "score2": fs2}},
+						"status":  mapFixtureStatus(st),
+						"events":  []map[string]any{{"matchId": mid, "score1": fs1, "score2": fs2}},
 						"afterId": mid, "source": "tournament_fixtures",
 					}
 				}
