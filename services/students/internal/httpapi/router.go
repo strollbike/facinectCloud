@@ -28,6 +28,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/students/facilities/{facilityId}/students", s.withAuth(s.handleListStudents))
 	mux.HandleFunc("POST /v1/students/facilities/{facilityId}/students", s.withAuth(s.handleEnroll))
 	mux.HandleFunc("POST /v1/students/facilities/{facilityId}/students/{studentId}", s.withAuth(s.handleUpdateStudent))
+	mux.HandleFunc("POST /v1/students/facilities/{facilityId}/students/{studentId}/photo", s.withAuth(s.handleSaveStudentPhoto))
+	mux.HandleFunc("GET /v1/students/photos/{name}", s.withAuth(s.handleStudentPhoto))
 
 	mux.HandleFunc("POST /v1/students/facilities/{facilityId}/enrollments/{enrollmentId}/status", s.withAuth(s.handleUpdateStatus))
 	mux.HandleFunc("POST /v1/students/facilities/{facilityId}/enrollments/{enrollmentId}/plan", s.withAuth(s.handleUpdatePlan))
@@ -502,6 +504,77 @@ func (s *Server) handleUpdatePlan(w http.ResponseWriter, r *http.Request, ac *au
 		return
 	}
 	writeJSON(w, http.StatusOK, row)
+}
+
+func (s *Server) handleSaveStudentPhoto(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	fid, err := pathInt(r, "facilityId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_facility_id"})
+		return
+	}
+	sid, err := pathInt(r, "studentId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_student_id"})
+		return
+	}
+	if err := s.requireFacility(ac, fid); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	var body struct {
+		ImageBase64 string `json:"image_base64"`
+		Ext         string `json:"ext"`
+		Remove      bool   `json:"remove"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	if body.Remove {
+		if err := s.Students.ClearStudentPhoto(r.Context(), fid, sid); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"photo_url": ""})
+		return
+	}
+	url, err := s.Students.SaveStudentPhoto(r.Context(), fid, sid, body.ImageBase64, body.Ext)
+	if err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "student_not_found" {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"photo_url": url})
+}
+
+func (s *Server) handleStudentPhoto(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	idPart := name
+	if i := strings.Index(name, "."); i > 0 {
+		idPart = name[:i]
+	}
+	sid, err := strconv.ParseInt(idPart, 10, 64)
+	if err != nil || sid <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	path, contentType, err := s.Students.StudentPhotoFile(r.Context(), sid, func(facilityID int64) bool {
+		return s.requireFacility(ac, facilityID) == nil
+	})
+	if err != nil {
+		if err.Error() == "forbidden_facility" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	http.ServeFile(w, r, path)
 }
 
 func (s *Server) handleListPlans(w http.ResponseWriter, r *http.Request, ac *authCtx) {
