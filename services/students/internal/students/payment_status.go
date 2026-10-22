@@ -147,9 +147,18 @@ LIMIT 24`, facilityID, enrollmentID)
 	return out, rows.Err()
 }
 
+func amountsDiffer(a, b float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d > 0.009
+}
+
 // MarkStudentPayment upserts one month's fee_bill for the student.
 // Same student can have many unpaid months — each month is its own bill.
-// Paid cash amount + reason update that month only; bill_amount (plan fee) is unchanged.
+// paid_amount and payment_method update that month only. bill_amount (plan fee) stays.
+// Reason is required only when the received amount differs from the plan fee.
 func (s *Service) MarkStudentPayment(ctx context.Context, facilityID int64, in MarkPaymentInput) (*MarkPaymentResult, error) {
 	if facilityID <= 0 || in.EnrollmentID <= 0 {
 		return nil, fmt.Errorf("invalid_request")
@@ -165,9 +174,6 @@ func (s *Service) MarkStudentPayment(ctx context.Context, facilityID int64, in M
 	reason := strings.TrimSpace(in.Reason)
 	method := strings.ToLower(strings.TrimSpace(in.PaymentMethod))
 	if status == "paid" {
-		if reason == "" {
-			return nil, fmt.Errorf("reason_required")
-		}
 		if in.PaidAmount == nil {
 			return nil, fmt.Errorf("paid_amount_required")
 		}
@@ -176,6 +182,9 @@ func (s *Service) MarkStudentPayment(ctx context.Context, facilityID int64, in M
 		}
 		if method == "" {
 			method = "cash"
+		}
+		if method != "cash" && method != "online" {
+			return nil, fmt.Errorf("invalid_payment_method")
 		}
 	} else {
 		reason = ""
@@ -225,7 +234,10 @@ LIMIT 1`, facilityID, in.EnrollmentID, month).Scan(
 		if fee <= 0 {
 			fee = 0
 		}
-		billAmount = fee // plan fee snapshot — never overwritten by cash received
+		billAmount = fee // plan fee snapshot — never overwritten by the amount received
+		if status == "paid" && amountsDiffer(*in.PaidAmount, billAmount) && reason == "" {
+			return nil, fmt.Errorf("reason_required")
+		}
 		if status == "paid" {
 			paidAmount = *in.PaidAmount
 			payStatus = "paid"
@@ -250,6 +262,9 @@ RETURNING id`,
 		return nil, err
 	} else {
 		// Keep existing bill_amount (plan fee). Only update paid_amount + note for this month.
+		if status == "paid" && amountsDiffer(*in.PaidAmount, billAmount) && reason == "" {
+			return nil, fmt.Errorf("reason_required")
+		}
 		if status == "paid" {
 			paidAmount = *in.PaidAmount
 			payStatus = "paid"
