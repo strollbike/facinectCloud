@@ -20,6 +20,7 @@ type Config struct {
 	JWTAudience      string
 	NotificationsURL string
 	NotificationsKey string
+	PhotoDir         string
 }
 
 func FromEnv() Config {
@@ -38,6 +39,7 @@ func FromEnv() Config {
 		JWTAudience:      getenv("JWT_AUDIENCE", "facinect-apps"),
 		NotificationsURL: strings.TrimRight(getenv("NOTIFICATIONS_BASE_URL", "http://notifications:8080"), "/"),
 		NotificationsKey: strings.TrimSpace(os.Getenv("NOTIFICATIONS_SERVICE_KEY")),
+		PhotoDir:         getenv("STUDENT_PHOTO_DIR", "/data/student-photos"),
 	}
 }
 

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS students (
 );
 CREATE INDEX IF NOT EXISTS idx_students_phone ON students(contact_phone);
 CREATE INDEX IF NOT EXISTS idx_students_email ON students(contact_email);
+ALTER TABLE students ADD COLUMN IF NOT EXISTS photo_url TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS student_enrollments (
   id              BIGSERIAL PRIMARY KEY,

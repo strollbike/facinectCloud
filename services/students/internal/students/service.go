@@ -27,6 +27,7 @@ type StudentRow struct {
 	Email         string   `json:"contact_email,omitempty"`
 	Phone         string   `json:"contact_phone,omitempty"`
 	WhatsApp      string   `json:"whatsapp,omitempty"`
+	PhotoURL      string   `json:"photo_url,omitempty"`
 	SportID       *int64   `json:"sport_id,omitempty"`
 	PlanName      string   `json:"plan_name,omitempty"`
 	StartDate     string   `json:"start_date,omitempty"`
@@ -44,6 +45,7 @@ type AttendanceRow struct {
 	FacilityID     int64  `json:"facility_id"`
 	FirstName      string `json:"first_name"`
 	LastName       string `json:"last_name"`
+	PhotoURL       string `json:"photo_url,omitempty"`
 	Phone          string `json:"contact_phone,omitempty"`
 	PlanName       string `json:"plan_name,omitempty"`
 	AttendanceDate string `json:"attendance_date"`
@@ -133,6 +135,7 @@ func (s *Service) ListStudents(ctx context.Context, facilityID int64, sportID *i
 	q := `
 SELECT e.id, s.id, e.facility_id, s.first_name, s.last_name,
        COALESCE(s.contact_email,''), COALESCE(s.contact_phone,''), COALESCE(s.whatsapp,''),
+       COALESCE(s.photo_url,''),
        e.sport_id, COALESCE(e.plan_name,''),
        COALESCE(e.start_date::text,''), COALESCE(e.end_date::text,''), e.actual_fee,
        e.status,
@@ -198,7 +201,7 @@ WHERE e.facility_id=$1`
 		var fee sql.NullFloat64
 		if err := rows.Scan(
 			&r.EnrollmentID, &r.StudentID, &r.FacilityID, &r.FirstName, &r.LastName,
-			&r.Email, &r.Phone, &r.WhatsApp, &sport, &r.PlanName,
+			&r.Email, &r.Phone, &r.WhatsApp, &r.PhotoURL, &sport, &r.PlanName,
 			&r.StartDate, &r.EndDate, &fee, &r.Status, &r.PaymentStatus, &r.UnpaidCount, &r.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -311,6 +314,7 @@ func (s *Service) GetEnrollment(ctx context.Context, enrollmentID int64) (*Stude
 	err := s.DB.QueryRowContext(ctx, `
 SELECT e.id, s.id, e.facility_id, s.first_name, s.last_name,
        COALESCE(s.contact_email,''), COALESCE(s.contact_phone,''), COALESCE(s.whatsapp,''),
+       COALESCE(s.photo_url,''),
        e.sport_id, COALESCE(e.plan_name,''),
        COALESCE(e.start_date::text,''), COALESCE(e.end_date::text,''), e.actual_fee,
        e.status, e.created_at::text
@@ -318,7 +322,7 @@ FROM student_enrollments e
 JOIN students s ON s.id = e.student_id
 WHERE e.id=$1`, enrollmentID).Scan(
 		&r.EnrollmentID, &r.StudentID, &r.FacilityID, &r.FirstName, &r.LastName,
-		&r.Email, &r.Phone, &r.WhatsApp, &sport, &r.PlanName,
+		&r.Email, &r.Phone, &r.WhatsApp, &r.PhotoURL, &sport, &r.PlanName,
 		&r.StartDate, &r.EndDate, &fee, &r.Status, &r.CreatedAt,
 	)
 	if err != nil {
@@ -343,7 +347,7 @@ func (s *Service) ListAttendance(ctx context.Context, facilityID int64, date str
 		return nil, err
 	}
 	rows, err := s.DB.QueryContext(ctx, `
-SELECT e.id, s.id, e.facility_id, s.first_name, s.last_name,
+SELECT e.id, s.id, e.facility_id, s.first_name, s.last_name, COALESCE(s.photo_url,''),
        COALESCE(s.contact_phone,''), COALESCE(e.plan_name,''),
        $2::text,
        COALESCE(a.status,''), a.id, COALESCE(a.notes,'')
@@ -362,7 +366,7 @@ ORDER BY s.first_name, s.last_name, e.id`, facilityID, date)
 		var r AttendanceRow
 		var attID sql.NullInt64
 		if err := rows.Scan(
-			&r.EnrollmentID, &r.StudentID, &r.FacilityID, &r.FirstName, &r.LastName,
+			&r.EnrollmentID, &r.StudentID, &r.FacilityID, &r.FirstName, &r.LastName, &r.PhotoURL,
 			&r.Phone, &r.PlanName, &r.AttendanceDate, &r.Status, &attID, &r.Notes,
 		); err != nil {
 			return nil, err

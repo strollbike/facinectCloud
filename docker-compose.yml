@@ -241,6 +241,7 @@ services:
       DB_USER: ${POSTGRES_IDENTITY_USER}
       DB_PASSWORD: ${POSTGRES_IDENTITY_PASSWORD}
       STUDENTS_SERVICE_KEY: ${STUDENTS_SERVICE_KEY:-}
+      STUDENT_PHOTO_DIR: /data/student-photos
       NOTIFICATIONS_BASE_URL: http://notifications:8080
       NOTIFICATIONS_SERVICE_KEY: ${NOTIFICATIONS_SERVICE_KEY:-}
       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
@@ -249,6 +250,7 @@ services:
       CORS_ORIGINS: "*"
     volumes:
       - ./keys:/keys:ro
+      - student_photos:/data/student-photos
     depends_on:
       postgres:
         condition: service_healthy
@@ -829,3 +831,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  student_photos:
