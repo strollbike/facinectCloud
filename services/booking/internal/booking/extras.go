@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"strconv"
@@ -230,11 +231,12 @@ func (s *Service) CreateRecurrenceBlocks(ctx context.Context, facilityID int64, 
 		if in.CourtID != nil && *in.CourtID > 0 {
 			court = *in.CourtID
 		}
-		_, err := s.DB.ExecContext(ctx, `
-INSERT INTO booking_recurring_blocks (facility_id, court_id, weekdays, start_time, end_time, reason, active)
-VALUES ($1,$2,$3::int[],$4::time,$5::time,NULLIF($6,''),TRUE)`,
-			facilityID, court, pgIntArrayLiteral(weekdays), start, end, reason)
-		if err != nil {
+		if name, ok := coachingPlanName(reason); ok {
+			if err := s.upsertCoachingBatchFromBlock(ctx, facilityID, name, start, end, weekdays); err != nil {
+				return 0, err
+			}
+		}
+		if err := s.saveRecurringBlock(ctx, facilityID, court, weekdays, start, end, reason); err != nil {
 			return 0, err
 		}
 		weeks := in.WeeksAhead
@@ -794,6 +796,9 @@ UPDATE booking_recurring_blocks SET active=FALSE WHERE id=$1 AND facility_id=$2`
 			if err != nil {
 				return unblocked, err
 			}
+			if name, ok := coachingPlanName(reason); ok {
+				s.deactivateCoachingBatch(ctx, facilityID, name)
+			}
 			return n, nil
 		}
 		if err != sql.ErrNoRows {
@@ -1342,6 +1347,103 @@ ON CONFLICT (facility_id, user_id) DO UPDATE
 SET status=EXCLUDED.status, reason=EXCLUDED.reason, updated_at=NOW()`,
 		facilityID, userID, st, strings.TrimSpace(in.Reason))
 	return err
+}
+
+// coachingPlanName reads "Coaching: Batch name" from a block reason.
+func coachingPlanName(reason string) (string, bool) {
+	reason = strings.TrimSpace(reason)
+	const prefix = "coaching:"
+	if len(reason) < len(prefix) || !strings.EqualFold(reason[:len(prefix)], prefix) {
+		return "", false
+	}
+	name := strings.TrimSpace(reason[len(prefix):])
+	if name == "" || len(name) > 128 {
+		return "", false
+	}
+	return name, true
+}
+
+// saveRecurringBlock inserts a weekly rule. A coaching reason updates the
+// existing Active block for that batch instead of adding a second rule.
+func (s *Service) saveRecurringBlock(ctx context.Context, facilityID int64, court interface{}, weekdays []int, start, end, reason string) error {
+	if _, ok := coachingPlanName(reason); ok {
+		var existing int64
+		err := s.DB.QueryRowContext(ctx, `
+SELECT id FROM booking_recurring_blocks
+WHERE facility_id=$1 AND reason=$2 AND active=TRUE
+ORDER BY id LIMIT 1`, facilityID, reason).Scan(&existing)
+		if err == nil && existing > 0 {
+			_, err = s.DB.ExecContext(ctx, `
+UPDATE booking_recurring_blocks
+SET court_id=$2, weekdays=$3::int[], start_time=$4::time, end_time=$5::time, active=TRUE
+WHERE id=$1`, existing, court, pgIntArrayLiteral(weekdays), start, end)
+			return err
+		}
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+	}
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO booking_recurring_blocks (facility_id, court_id, weekdays, start_time, end_time, reason, active)
+VALUES ($1,$2,$3::int[],$4::time,$5::time,NULLIF($6,''),TRUE)`,
+		facilityID, court, pgIntArrayLiteral(weekdays), start, end, reason)
+	return err
+}
+
+// upsertCoachingBatchFromBlock keeps Batches in step with a weekly Coaching block.
+func (s *Service) upsertCoachingBatchFromBlock(ctx context.Context, facilityID int64, name, start, end string, weekdays []int) error {
+	if facilityID <= 0 || strings.TrimSpace(name) == "" || len(weekdays) == 0 {
+		return nil
+	}
+	parts := make([]string, len(weekdays))
+	for i, d := range weekdays {
+		parts[i] = strconv.Itoa(d)
+	}
+	days := strings.Join(parts, ",")
+	st := normalizeTime(start)
+	en := normalizeTime(end)
+	if len(st) > 8 {
+		st = st[:8]
+	}
+	if len(en) > 8 {
+		en = en[:8]
+	}
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO student_coaching_plans
+  (facility_id, name, days_per_week, start_time, end_time, coaching_days, status)
+VALUES ($1,$2,$3,$4,$5,$6,'active')
+ON CONFLICT (facility_id, name) DO UPDATE SET
+  days_per_week = EXCLUDED.days_per_week,
+  start_time = EXCLUDED.start_time,
+  end_time = EXCLUDED.end_time,
+  coaching_days = EXCLUDED.coaching_days,
+  status = 'active',
+  updated_at = NOW()`,
+		facilityID, strings.TrimSpace(name), len(weekdays), st, en, days)
+	return err
+}
+
+// deactivateCoachingBatch hides the batch and its enrollments. Student rows stay.
+func (s *Service) deactivateCoachingBatch(ctx context.Context, facilityID int64, name string) {
+	name = strings.TrimSpace(name)
+	if facilityID <= 0 || name == "" {
+		return
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+UPDATE student_coaching_plans
+SET status='inactive', updated_at=NOW()
+WHERE facility_id=$1 AND status='active' AND LOWER(TRIM(name))=LOWER(TRIM($2))`,
+		facilityID, name); err != nil {
+		log.Printf("coaching batch hide facility=%d plan=%q: %v", facilityID, name, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+UPDATE student_enrollments
+SET status='inactive', updated_at=NOW()
+WHERE facility_id=$1 AND status='active'
+  AND LOWER(TRIM(COALESCE(plan_name,'')))=LOWER(TRIM($2))`,
+		facilityID, name); err != nil {
+		log.Printf("coaching enrollment hide facility=%d plan=%q: %v", facilityID, name, err)
+	}
 }
 
 func normalizeTime(t string) string {

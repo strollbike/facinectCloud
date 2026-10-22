@@ -648,7 +648,7 @@ func (s *Server) handleSoftDeleteCoachingPlan(w http.ResponseWriter, r *http.Req
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":      true,
-		"message": "Batch removed from lists (data kept).",
+		"message": "Batch hidden. Students in this batch are inactive. Their records stay.",
 	})
 }
 

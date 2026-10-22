@@ -78,8 +78,8 @@ func startSlotMaintenanceCron(svc *booking.Service, intervalHours int) {
 	}()
 }
 
-// startPastFreeSlotCleanupCron deletes only past (and ended today) available slots.
-// Booked/blocked are never removed. Lightweight; runs separately from full month maintenance.
+// startPastFreeSlotCleanupCron deletes past available slots and past coaching
+// blocked slots. Booked rows and non-coaching blocks stay. The recurring rule stays.
 func startPastFreeSlotCleanupCron(svc *booking.Service, intervalMinutes int) {
 	if intervalMinutes <= 0 {
 		log.Printf("past free-slot cleanup cron disabled (BOOKING_PAST_FREE_CLEANUP_MINUTES=%d)", intervalMinutes)
@@ -94,7 +94,7 @@ func startPastFreeSlotCleanupCron(svc *booking.Service, intervalMinutes int) {
 			return
 		}
 		if n > 0 {
-			log.Printf("past free-slot cleanup: deleted %d available slot(s)", n)
+			log.Printf("past slot cleanup: deleted %d slot(s)", n)
 		}
 	}
 	go func() {
