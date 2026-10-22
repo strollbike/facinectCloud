@@ -446,6 +446,11 @@ UPDATE booking_payment_holds SET status='paid', paid_at=NOW(), updated_at=NOW() 
 		return nil, err
 	}
 	out.BookingIDs = bookingIDs
+	for _, id := range bookingIDs {
+		if booked, berr := s.GetBooking(ctx, id); berr == nil {
+			s.notifyFacilityBooking(ctx, booked, false)
+		}
+	}
 	return out, nil
 }
 

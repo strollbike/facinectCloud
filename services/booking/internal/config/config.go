@@ -31,6 +31,8 @@ type Config struct {
 	// PaygatewayURL: create Razorpay/stub payment links for booking holds.
 	PaygatewayURL        string
 	PaygatewayServiceKey string
+	NotificationsURL     string
+	NotificationsKey     string
 }
 
 func FromEnv() Config {
@@ -55,6 +57,8 @@ func FromEnv() Config {
 		PastFreeCleanupMinutes:   getenvInt("BOOKING_PAST_FREE_CLEANUP_MINUTES", 60),
 		PaygatewayURL:            strings.TrimRight(getenv("PAYGATEWAY_URL", "http://paygateway:8080"), "/"),
 		PaygatewayServiceKey:     strings.TrimSpace(os.Getenv("PAYGATEWAY_SERVICE_KEY")),
+		NotificationsURL:         strings.TrimRight(getenv("NOTIFICATIONS_BASE_URL", "http://notifications:8080"), "/"),
+		NotificationsKey:         strings.TrimSpace(os.Getenv("NOTIFICATIONS_SERVICE_KEY")),
 	}
 }
 

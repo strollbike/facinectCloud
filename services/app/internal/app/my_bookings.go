@@ -338,6 +338,7 @@ VALUES ($1,$2,$3,'booking_cancelled',$4,$5,'booking',$6::jsonb)`,
 	if err := s.notifyBookingPush(ctx, facilityID, userID, title, body, bookingID); err != nil {
 		log.Printf("booking cancel push: booking=%d err=%v", bookingID, err)
 	}
+	s.notifyFacilityStaffPush(ctx, facilityID, title, body, bookingID)
 
 	u, _ := s.userRow(ctx, userID, "")
 	uPhone := ""
@@ -349,7 +350,6 @@ VALUES ($1,$2,$3,'booking_cancelled',$4,$5,'booking',$6::jsonb)`,
 	}
 	if uPhone == "" {
 		log.Printf("booking cancel WA skipped: booking=%d no phone", bookingID)
-		return
 	}
 
 	sportName := "Sport"
@@ -376,43 +376,54 @@ VALUES ($1,$2,$3,'booking_cancelled',$4,$5,'booking',$6::jsonb)`,
 
 	// PHP my_bookings.php free-form cancellation notice (not Meta template).
 	msg := buildCancelWhatsAppMessage(bid, sportName, dateStr, timeStr, refundCoupon, isRegOffer)
-	if err := s.notifyBookingWhatsAppText(ctx, facilityID, userID, uPhone, title, msg); err != nil {
-		log.Printf("booking cancel WA text: booking=%d err=%v — falling back to template", bookingID, err)
-		// Fallback: 6-param template if session text fails (outside 24h window).
-		tmpl := strings.TrimSpace(s.Cfg.BookingCancelWhatsAppTemplate)
-		if tmpl == "" {
-			tmpl = "booking_cancellation"
+	tmpl := strings.TrimSpace(s.Cfg.BookingCancelWhatsAppTemplate)
+	if tmpl == "" {
+		tmpl = "booking_cancellation"
+	}
+	uName := "Customer"
+	if u != nil {
+		if v := strings.TrimSpace(fmt.Sprint(u["fullName"])); v != "" && v != "<nil>" {
+			uName = v
 		}
-		uName := "Customer"
-		if u != nil {
-			if v := strings.TrimSpace(fmt.Sprint(u["fullName"])); v != "" && v != "<nil>" {
-				uName = v
+	}
+	fName := strings.TrimSpace(facilityName)
+	if fName == "" {
+		fName = "Academy"
+	}
+	var bodyParams []string
+	if len(parsed) > 0 {
+		p1, p2, p3, p4, p5, p6, _ := buildBookingWAParams(
+			uName, bookingID, fName, parsed, "cancelled", "CANCEL_"+bid, 0, 0, 0, 0,
+		)
+		timePart := strings.TrimSpace(strings.TrimPrefix(p6, "⏰ "))
+		tail := "❌ Cancelled · " + timePart + " | Ref: " + bid
+		if refundCoupon != "" {
+			tail = "❌ Cancelled · " + timePart + " | Coupon: " + refundCoupon + " | Ref: " + bid
+		}
+		bodyParams = []string{p1, p2, p3, p4, p5, tail}
+	} else {
+		tail := "❌ Cancelled | Ref: " + bid
+		if refundCoupon != "" {
+			tail = "❌ Cancelled | Coupon: " + refundCoupon + " | Ref: " + bid
+		}
+		bodyParams = []string{uName, "🧾 " + bid, "📍 " + fName, "🏟️ Court", "🗓️ —", tail}
+	}
+	if uPhone != "" {
+		if err := s.notifyBookingWhatsAppText(ctx, facilityID, userID, uPhone, title, msg); err != nil {
+			log.Printf("booking cancel WA text: booking=%d err=%v — falling back to template", bookingID, err)
+			if err2 := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, uPhone, tmpl, title, bodyParams); err2 != nil {
+				log.Printf("booking cancel WA template: booking=%d err=%v", bookingID, err2)
 			}
 		}
-		fName := strings.TrimSpace(facilityName)
-		if fName == "" {
-			fName = "Academy"
-		}
-		var bodyParams []string
-		if len(parsed) > 0 {
-			p1, p2, p3, p4, p5, p6, _ := buildBookingWAParams(
-				uName, bookingID, fName, parsed, "cancelled", "CANCEL_"+bid, 0, 0, 0, 0,
-			)
-			timePart := strings.TrimSpace(strings.TrimPrefix(p6, "⏰ "))
-			tail := "❌ Cancelled · " + timePart + " | Ref: " + bid
-			if refundCoupon != "" {
-				tail = "❌ Cancelled · " + timePart + " | Coupon: " + refundCoupon + " | Ref: " + bid
-			}
-			bodyParams = []string{p1, p2, p3, p4, p5, tail}
-		} else {
-			tail := "❌ Cancelled | Ref: " + bid
-			if refundCoupon != "" {
-				tail = "❌ Cancelled | Coupon: " + refundCoupon + " | Ref: " + bid
-			}
-			bodyParams = []string{uName, "🧾 " + bid, "📍 " + fName, "🏟️ Court", "🗓️ —", tail}
-		}
-		if err2 := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, uPhone, tmpl, title, bodyParams); err2 != nil {
-			log.Printf("booking cancel WA template: booking=%d err=%v", bookingID, err2)
+	}
+	facPhone := s.facilityWhatsApp(ctx, facilityID)
+	if facPhone == "" || sameWhatsApp(facPhone, uPhone) {
+		return
+	}
+	if err := s.notifyBookingWhatsAppText(ctx, facilityID, 0, facPhone, title, msg); err != nil {
+		log.Printf("facility cancel WA text: booking=%d err=%v — falling back to template", bookingID, err)
+		if err2 := s.notifyBookingWhatsAppTemplate(ctx, facilityID, 0, facPhone, tmpl, title, bodyParams); err2 != nil {
+			log.Printf("facility cancel WA template: booking=%d err=%v", bookingID, err2)
 		}
 	}
 }

@@ -302,7 +302,12 @@ UPDATE booking_slots SET status='booked', notes=NULLIF($2,''), updated_at=NOW() 
 	}
 	// Keep Proximity app_slots in sync (strollx Book now / without note).
 	_ = s.syncAppSlotFromBookingSlot(ctx, in.SlotID)
-	return s.GetBooking(ctx, bookingID)
+	booked, err := s.GetBooking(ctx, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	s.notifyFacilityBooking(ctx, booked, false)
+	return booked, nil
 }
 
 func (s *Service) CancelBooking(ctx context.Context, bookingID int64) (*Booking, error) {
@@ -341,7 +346,12 @@ WHERE id=$1 AND status='booked'`, slotID)
 		return nil, err
 	}
 	_ = s.syncAppSlotFromBookingSlot(ctx, slotID)
-	return s.GetBooking(ctx, bookingID)
+	cancelled, err := s.GetBooking(ctx, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	s.notifyFacilityBooking(ctx, cancelled, true)
+	return cancelled, nil
 }
 
 // syncAppSlotFromBookingSlot mirrors one booking_slots row into Proximity app_slots.
