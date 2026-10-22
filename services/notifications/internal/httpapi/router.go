@@ -32,7 +32,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/notifications/facilities/{facilityId}/whatsapp", s.withAuth(s.handlePutFacilityWA))
 	mux.HandleFunc("GET /v1/notifications/whatsapp/lookup", s.withAuth(s.handleLookupByPhone))
 	mux.HandleFunc("GET /v1/notifications/history", s.withAuth(s.handleHistory))
-	mux.HandleFunc("GET /v1/notifications/inbox", s.withAuth(s.handleInbox))
+	mux.HandleFunc("GET /v1/notifications/inbox", s.withInboxAuth(s.handleInbox))
 	mux.HandleFunc("GET /v1/notifications/{id}", s.withAuth(s.handleGetJob))
 	mux.HandleFunc("POST /v1/notifications/devices", s.withAuth(s.handleRegisterDevice))
 	return s.withCORS(mux)
@@ -105,14 +105,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		st = "degraded"
 	}
 	writeJSON(w, status, map[string]interface{}{
-		"service":             "notifications",
-		"status":              st,
-		"postgres":            ok,
-		"whatsapp":            s.Cfg.WhatsAppConfigured(),
-		"push":                s.Cfg.PushConfigured(),
-		"dry_run":             s.Cfg.DryRun,
-		"service_key_set":     s.Cfg.ServiceKey != "",
-		"runtime":             "go",
+		"service":         "notifications",
+		"status":          st,
+		"postgres":        ok,
+		"whatsapp":        s.Cfg.WhatsAppConfigured(),
+		"push":            s.Cfg.PushConfigured(),
+		"dry_run":         s.Cfg.DryRun,
+		"service_key_set": s.Cfg.ServiceKey != "",
+		"runtime":         "go",
 	})
 }
 
@@ -175,11 +175,11 @@ func (s *Server) handleListServiceBroadcasts(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleSendBulk(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Channel     string                   `json:"channel"`
-		FacilityID  *int64                   `json:"facility_id"`
-		TemplateKey string                   `json:"template"`
-		Recipients  []notify.SendTo          `json:"recipients"`
-		Data        map[string]interface{}   `json:"data"`
+		Channel     string                 `json:"channel"`
+		FacilityID  *int64                 `json:"facility_id"`
+		TemplateKey string                 `json:"template"`
+		Recipients  []notify.SendTo        `json:"recipients"`
+		Data        map[string]interface{} `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
@@ -335,20 +335,49 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
 }
 
+func (s *Server) withInboxAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.bearerUserID(r) > 0 || s.authorized(r) {
+			next(w, r)
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+}
+
+func (s *Server) bearerUserID(r *http.Request) int64 {
+	if s.JWT == nil {
+		return 0
+	}
+	authz := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(authz) < 8 || !strings.EqualFold(authz[:7], "bearer ") {
+		return 0
+	}
+	p, err := s.JWT.ParseAccess(strings.TrimSpace(authz[7:]))
+	if err != nil || p == nil || p.UserID <= 0 {
+		return 0
+	}
+	return p.UserID
+}
+
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	var userID *int64
-	uidStr := strings.TrimSpace(r.URL.Query().Get("userId"))
-	if uidStr == "" {
-		uidStr = strings.TrimSpace(r.URL.Query().Get("user_id"))
-	}
-	if uidStr != "" {
-		n, err := strconv.ParseInt(uidStr, 10, 64)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_user_id"})
-			return
+	if uid := s.bearerUserID(r); uid > 0 {
+		userID = &uid
+	} else {
+		uidStr := strings.TrimSpace(r.URL.Query().Get("userId"))
+		if uidStr == "" {
+			uidStr = strings.TrimSpace(r.URL.Query().Get("user_id"))
 		}
-		userID = &n
+		if uidStr != "" {
+			n, err := strconv.ParseInt(uidStr, 10, 64)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_user_id"})
+				return
+			}
+			userID = &n
+		}
 	}
 	email := strings.TrimSpace(r.URL.Query().Get("email"))
 	items, err := s.Notify.Inbox(r.Context(), userID, email, limit)
