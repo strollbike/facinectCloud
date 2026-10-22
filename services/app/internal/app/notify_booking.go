@@ -82,6 +82,7 @@ func (s *Service) notifyBookingConfirmation(
 		"audience":      "booking_user",
 	})
 
+	s.notifyFacilityStaffPush(ctx, facilityID, title, body, bookingID)
 	pushErr := s.notifyBookingPush(ctx, facilityID, userID, title, body, bookingID)
 	if pushErr != nil {
 		log.Printf("booking notify push: booking=%d err=%v", bookingID, pushErr)
@@ -90,13 +91,13 @@ func (s *Service) notifyBookingConfirmation(
 		}
 	}
 
+	params := []string{p1, p2, p3, p4, p5, p6, p7}
 	if uPhone == "" {
 		log.Printf("booking notify WA skipped: booking=%d no phone", bookingID)
-		return
-	}
-	if err := s.notifyBookingWhatsApp(ctx, facilityID, userID, uPhone, []string{p1, p2, p3, p4, p5, p6, p7}); err != nil {
+	} else if err := s.notifyBookingWhatsApp(ctx, facilityID, userID, uPhone, params); err != nil {
 		log.Printf("booking notify WA: booking=%d err=%v", bookingID, err)
 	}
+	s.notifyFacilityBookingWhatsApp(ctx, facilityID, userID, uPhone, "booking_confirmation", title, params)
 }
 
 type bookingSlotParts struct {
@@ -283,6 +284,72 @@ VALUES ($1,$2,$3,'booking_user_notify',$4,$5,'booking',$6::jsonb)`,
 	return err
 }
 
+func (s *Service) notifyFacilityStaffPush(ctx context.Context, facilityID int64, title, body string, bookingID int64) {
+	if facilityID <= 0 {
+		return
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT DISTINCT m.user_id
+FROM user_facility_memberships m
+WHERE m.facility_id=$1 AND m.status='active' AND m.user_id>0
+  AND lower(replace(replace(m.role, ' ', '_'), '-', '_')) IN ('admin', 'sub_admin', 'subadmin')`, facilityID)
+	if err != nil {
+		log.Printf("facility staff push: facility=%d err=%v", facilityID, err)
+		return
+	}
+	defer rows.Close()
+	seen := map[int64]struct{}{}
+	for rows.Next() {
+		var staffID int64
+		if rows.Scan(&staffID) != nil || staffID <= 0 {
+			continue
+		}
+		targets := []int64{staffID}
+		mapped, merr := s.DB.QueryContext(ctx, `
+SELECT DISTINCT users_user_id FROM app_fcm_audience_map
+WHERE audience='management' AND role_id=$1 AND users_user_id>0`, staffID)
+		if merr == nil {
+			for mapped.Next() {
+				var appUser int64
+				if mapped.Scan(&appUser) == nil && appUser > 0 {
+					targets = append(targets, appUser)
+				}
+			}
+			mapped.Close()
+		}
+		for _, uid := range targets {
+			if _, ok := seen[uid]; ok {
+				continue
+			}
+			seen[uid] = struct{}{}
+			if err := s.notifyStaffPush(ctx, facilityID, uid, title, body, bookingID); err != nil {
+				log.Printf("facility staff push: facility=%d user=%d err=%v", facilityID, uid, err)
+			}
+		}
+	}
+}
+
+func (s *Service) notifyStaffPush(ctx context.Context, facilityID, userID int64, title, body string, bookingID int64) error {
+	base := strings.TrimRight(strings.TrimSpace(s.Cfg.NotificationsURL), "/")
+	if base == "" {
+		return fmt.Errorf("notifications_url_missing")
+	}
+	payload := map[string]any{
+		"channel":     "push",
+		"facility_id": facilityID,
+		"template":    "booking_staff_notify",
+		"to":          map[string]any{"user_id": userID},
+		"data": map[string]any{
+			"title":     title,
+			"body":      body,
+			"type":      "booking_staff_notify",
+			"bookingId": strconv.FormatInt(bookingID, 10),
+			"audience":  "management",
+		},
+	}
+	return s.postNotificationsSend(ctx, base, payload)
+}
+
 func (s *Service) notifyBookingPush(ctx context.Context, facilityID, userID int64, title, body string, bookingID int64) error {
 	base := strings.TrimRight(strings.TrimSpace(s.Cfg.NotificationsURL), "/")
 	if base == "" {
@@ -306,6 +373,43 @@ func (s *Service) notifyBookingPush(ctx context.Context, facilityID, userID int6
 
 func (s *Service) notifyBookingWhatsApp(ctx context.Context, facilityID, userID int64, phone string, bodyParams []string) error {
 	return s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, phone, "booking_confirmation", "Booking confirmed", bodyParams)
+}
+
+func (s *Service) facilityWhatsApp(ctx context.Context, facilityID int64) string {
+	if facilityID <= 0 {
+		return ""
+	}
+	var wa string
+	err := s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(NULLIF(whatsapp,''), NULLIF(phone,''), '')
+FROM facility_profiles WHERE facility_id=$1`, facilityID).Scan(&wa)
+	if err != nil {
+		return ""
+	}
+	return normalizeWA(wa)
+}
+
+func sameWhatsApp(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	if len(a) >= 10 && len(b) >= 10 {
+		return a[len(a)-10:] == b[len(b)-10:]
+	}
+	return false
+}
+
+func (s *Service) notifyFacilityBookingWhatsApp(ctx context.Context, facilityID, userID int64, customerPhone, template, title string, bodyParams []string) {
+	facPhone := s.facilityWhatsApp(ctx, facilityID)
+	if facPhone == "" || sameWhatsApp(facPhone, customerPhone) {
+		return
+	}
+	if err := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, facPhone, template, title, bodyParams); err != nil {
+		log.Printf("facility booking WA: facility=%d template=%s err=%v", facilityID, template, err)
+	}
 }
 
 func (s *Service) notifyBookingWhatsAppTemplate(
