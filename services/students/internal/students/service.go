@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -895,20 +896,27 @@ WHERE facility_id=$1 AND LOWER(TRIM(COALESCE(plan_name,''))) = LOWER(TRIM($2))`,
 	return row, nil
 }
 
-// SoftDeleteCoachingPlan hides a batch (status=inactive). Enrollments and plan row stay in DB.
-// planName is used when planID is missing/synthetic so enrollment-only batches can be hidden too.
+// SoftDeleteCoachingPlan hides a batch (status=inactive). Student rows stay.
+// Enrollments for that batch name become inactive. planName covers enrollment-only batches.
 func (s *Service) SoftDeleteCoachingPlan(ctx context.Context, facilityID, planID int64, planName string) error {
 	if facilityID <= 0 {
 		return fmt.Errorf("invalid_plan")
 	}
 	if planID > 0 {
 		var removed string
-		err := s.DB.QueryRowContext(ctx, `
+		q := `
 UPDATE student_coaching_plans
 SET status='inactive', updated_at=NOW()
-WHERE id=$1 AND facility_id=$2 AND status='active'
-RETURNING name`, planID, facilityID).Scan(&removed)
+WHERE id=$1 AND facility_id=$2 AND status='active'`
+		args := []interface{}{planID, facilityID}
+		if strings.TrimSpace(planName) != "" {
+			q += ` AND LOWER(TRIM(name))=LOWER(TRIM($3))`
+			args = append(args, strings.TrimSpace(planName))
+		}
+		q += ` RETURNING name`
+		err := s.DB.QueryRowContext(ctx, q, args...).Scan(&removed)
 		if err == nil {
+			s.deactivateBatchEnrollments(ctx, facilityID, removed)
 			s.removeCoachingActiveBlock(ctx, facilityID, removed)
 			return nil
 		}
@@ -929,8 +937,24 @@ ON CONFLICT (facility_id, name) DO UPDATE SET
 	if err != nil {
 		return err
 	}
+	s.deactivateBatchEnrollments(ctx, facilityID, name)
 	s.removeCoachingActiveBlock(ctx, facilityID, name)
 	return nil
+}
+
+func (s *Service) deactivateBatchEnrollments(ctx context.Context, facilityID int64, planName string) {
+	name := strings.TrimSpace(planName)
+	if facilityID <= 0 || name == "" {
+		return
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+UPDATE student_enrollments
+SET status='inactive', updated_at=NOW()
+WHERE facility_id=$1
+  AND status='active'
+  AND LOWER(TRIM(COALESCE(plan_name,''))) = LOWER(TRIM($2))`, facilityID, name); err != nil {
+		log.Printf("batch enrollment deactivate facility=%d plan=%q: %v", facilityID, name, err)
+	}
 }
 
 func validateDate(date string) error {

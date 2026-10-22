@@ -108,9 +108,11 @@ func (s *Service) slotLocation() *time.Location {
 	return loc
 }
 
-// CleanupPastAvailableSlots removes past Free (available) inventory for all facilities.
-// Booked and blocked rows are kept. Uses BOOKING_SLOT_TIMEZONE (default Asia/Kolkata).
-// Also drops today's available slots whose end_time has already passed in that TZ.
+// CleanupPastAvailableSlots removes past Free inventory and past Coaching blocked
+// slots for all facilities. Booked rows and other blocks (Membership, Maintenance)
+// are kept. The recurring Active block rule stays, so future coaching dates
+// continue to be generated. Uses BOOKING_SLOT_TIMEZONE (default Asia/Kolkata).
+// Also drops today's matching slots whose end_time has already passed in that TZ.
 func (s *Service) CleanupPastAvailableSlots(ctx context.Context) (int, error) {
 	now := time.Now().In(s.slotLocation())
 	today := now.Format("2006-01-02")
@@ -137,6 +139,61 @@ WHERE slot_date < $1::date
 	if err == nil {
 		n2, _ := res2.RowsAffected()
 		n += n2
+	}
+
+	// Mirror rows for past coaching blocks before the booking_slots rows go away.
+	res3, err := s.DB.ExecContext(ctx, `
+DELETE FROM app_slots a
+USING booking_slots s
+JOIN booking_courts c ON c.id = s.court_id
+WHERE a.facility_id = s.facility_id
+  AND a.court_name = c.name
+  AND a.slot_date = s.slot_date
+  AND a.time_range = to_char(s.start_time, 'HH24:MI') || '-' || to_char(s.end_time, 'HH24:MI')
+  AND LOWER(a.status) = 'blocked'
+  AND s.status = 'blocked'
+  AND s.notes ILIKE 'Coaching:%'
+  AND (
+    s.slot_date < $1::date
+    OR (s.slot_date = $1::date AND s.end_time <= $2::time)
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM booking_bookings b
+    WHERE b.slot_id = s.id AND b.status <> 'cancelled'
+  )`, today, clock)
+	if err == nil {
+		n3, _ := res3.RowsAffected()
+		n += n3
+	}
+
+	res4, err := s.DB.ExecContext(ctx, `
+DELETE FROM booking_slots s
+WHERE s.status = 'blocked'
+  AND s.notes ILIKE 'Coaching:%'
+  AND (
+    s.slot_date < $1::date
+    OR (s.slot_date = $1::date AND s.end_time <= $2::time)
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM booking_bookings b
+    WHERE b.slot_id = s.id AND b.status <> 'cancelled'
+  )`, today, clock)
+	if err != nil {
+		return int(n), err
+	}
+	n4, _ := res4.RowsAffected()
+	n += n4
+
+	res5, err := s.DB.ExecContext(ctx, `
+DELETE FROM booking_blocks
+WHERE reason ILIKE 'Coaching:%'
+  AND (
+    block_date < $1::date
+    OR (block_date = $1::date AND end_time <= $2::time)
+  )`, today, clock)
+	if err == nil {
+		n5, _ := res5.RowsAffected()
+		n += n5
 	}
 	return int(n), nil
 }
