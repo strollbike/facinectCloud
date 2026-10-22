@@ -1448,9 +1448,7 @@ WHERE id=$1 AND user_id=$2 AND status='confirmed'`, bid, uid)
 			paidAmount = 0
 		}
 		couponCode, couponAmt, expiry := s.mintCancelRefundCoupon(ctx, uid, facilityID, bid, paidAmount, notes, priorCoupon)
-		isRegOffer := strings.Contains(strings.ToLower(notes), "reg offer") ||
-			strings.HasPrefix(strings.ToUpper(priorCoupon), "REG-")
-		s.notifyBookingCancelled(ctx, uid, facilityID, sportID, bid, fname, slotsJSON, couponCode, couponAmt, isRegOffer)
+		s.notifyBookingCancelled(ctx, uid, facilityID, bid, fname, slotsJSON, couponCode, couponAmt)
 		var coupon any
 		if couponCode != "" {
 			coupon = couponCode

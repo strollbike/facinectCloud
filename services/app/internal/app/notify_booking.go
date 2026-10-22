@@ -97,7 +97,7 @@ func (s *Service) notifyBookingConfirmation(
 	} else if err := s.notifyBookingWhatsApp(ctx, facilityID, userID, uPhone, params); err != nil {
 		log.Printf("booking notify WA: booking=%d err=%v", bookingID, err)
 	}
-	s.notifyFacilityBookingWhatsApp(ctx, facilityID, userID, uPhone, "booking_confirmation", title, params)
+	s.notifyFacilityBookingWhatsApp(ctx, facilityID, userID, "booking_confirmation", title, params)
 }
 
 type bookingSlotParts struct {
@@ -376,22 +376,9 @@ FROM facility_profiles WHERE facility_id=$1`, facilityID).Scan(&wa)
 	return normalizeWA(wa)
 }
 
-func sameWhatsApp(a, b string) bool {
-	if a == "" || b == "" {
-		return false
-	}
-	if a == b {
-		return true
-	}
-	if len(a) >= 10 && len(b) >= 10 {
-		return a[len(a)-10:] == b[len(b)-10:]
-	}
-	return false
-}
-
-func (s *Service) notifyFacilityBookingWhatsApp(ctx context.Context, facilityID, userID int64, customerPhone, template, title string, bodyParams []string) {
+func (s *Service) notifyFacilityBookingWhatsApp(ctx context.Context, facilityID, userID int64, template, title string, bodyParams []string) {
 	facPhone := s.facilityWhatsApp(ctx, facilityID)
-	if facPhone == "" || sameWhatsApp(facPhone, customerPhone) {
+	if facPhone == "" {
 		return
 	}
 	if err := s.notifyBookingWhatsAppTemplate(ctx, facilityID, userID, facPhone, template, title, bodyParams); err != nil {
