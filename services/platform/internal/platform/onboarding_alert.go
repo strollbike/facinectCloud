@@ -19,16 +19,16 @@ import (
 
 const onboardingTemplate = "onboarding_pending_review"
 
-func (s *Service) notifyOnboardingPending(ctx context.Context, id int64, kind, email, wa string, payload map[string]interface{}) {
+func (s *Service) notifyOnboardingPending(ctx context.Context, id int64, kind, email, wa string, payload map[string]interface{}) error {
 	approve, err := s.encryptOnboardingLink(fmt.Sprintf("action=approve&id=%d", id))
 	if err != nil {
 		log.Printf("onboarding alert encrypt approve: %v", err)
-		return
+		return err
 	}
 	view, err := s.encryptOnboardingLink(fmt.Sprintf("action=view&kind=%s&id=%d", kind, id))
 	if err != nil {
 		log.Printf("onboarding alert encrypt view: %v", err)
-		return
+		return err
 	}
 	name := onboardingDisplayName(kind, payload)
 	if name == "" {
@@ -40,6 +40,10 @@ func (s *Service) notifyOnboardingPending(ctx context.Context, id int64, kind, e
 	if wa == "" {
 		wa = "-"
 	}
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return fmt.Errorf("invalid_kind")
+	}
 	typeLabel := strings.ToUpper(kind[:1]) + kind[1:]
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT whatsapp FROM platform_alert_contacts
@@ -47,7 +51,7 @@ WHERE purpose='onboarding_pending' AND active=TRUE AND trim(whatsapp) <> ''
 ORDER BY id`)
 	if err != nil {
 		log.Printf("onboarding alert contacts: %v", err)
-		return
+		return err
 	}
 	defer rows.Close()
 	var phones []string
@@ -59,13 +63,116 @@ ORDER BY id`)
 	}
 	if len(phones) == 0 {
 		log.Printf("onboarding alert: no active contacts for request %d", id)
-		return
+		return fmt.Errorf("no_alert_contacts")
 	}
+	sent := 0
+	var last error
 	for _, phone := range phones {
 		if err := s.sendOnboardingTemplate(ctx, phone, typeLabel, name, wa, email, id, approve, view); err != nil {
 			log.Printf("onboarding alert send %s: %v", phone, err)
+			last = err
+			continue
 		}
+		sent++
 	}
+	if sent == 0 {
+		if last == nil {
+			last = fmt.Errorf("send_failed")
+		}
+		return last
+	}
+	return nil
+}
+
+// SendPendingOnboardingAlert resends onboarding_pending_review for an existing pending request.
+func (s *Service) SendPendingOnboardingAlert(ctx context.Context, kind, email, wa string, id int64) (map[string]interface{}, error) {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind == "tournaments" {
+		kind = "tournament"
+	}
+	switch kind {
+	case "facility", "tournament", "referee":
+	default:
+		return nil, fmt.Errorf("invalid_kind")
+	}
+	email = normalizeEmail(email)
+	wa = normalizeWhatsApp(wa)
+	if id <= 0 && email == "" && wa == "" {
+		return nil, fmt.Errorf("request_required")
+	}
+
+	var rowID int64
+	var rowKind, rowEmail, rowWa, status string
+	var payload []byte
+	var err error
+	if id > 0 {
+		err = s.DB.QueryRowContext(ctx, `
+SELECT id, kind, COALESCE(email,''), COALESCE(whatsapp_number,''), status, COALESCE(payload,'{}'::jsonb)
+FROM platform_onboarding_requests WHERE id=$1`, id).
+			Scan(&rowID, &rowKind, &rowEmail, &rowWa, &status, &payload)
+	} else {
+		err = s.DB.QueryRowContext(ctx, `
+SELECT id, kind, COALESCE(email,''), COALESCE(whatsapp_number,''), status, COALESCE(payload,'{}'::jsonb)
+FROM platform_onboarding_requests
+WHERE kind=$1 AND status IN ('pending','submitted')
+  AND (
+    ($2 <> '' AND lower(trim(COALESCE(email,''))) = $2)
+    OR ($3 <> '' AND regexp_replace(COALESCE(whatsapp_number,''), '\D', '', 'g') = $3)
+  )
+ORDER BY id DESC
+LIMIT 1`, kind, email, wa).
+			Scan(&rowID, &rowKind, &rowEmail, &rowWa, &status, &payload)
+	}
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("not_found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(rowKind), kind) {
+		return nil, fmt.Errorf("not_found")
+	}
+	st := strings.ToLower(strings.TrimSpace(status))
+	if st != "pending" && st != "submitted" {
+		return nil, fmt.Errorf("not_pending")
+	}
+	if !onboardingIdentityMatches(rowEmail, rowWa, email, wa) {
+		return nil, fmt.Errorf("not_found")
+	}
+	var payloadMap map[string]interface{}
+	_ = json.Unmarshal(payload, &payloadMap)
+	if payloadMap == nil {
+		payloadMap = map[string]interface{}{}
+	}
+	if strings.TrimSpace(rowEmail) == "" {
+		rowEmail = email
+	}
+	if strings.TrimSpace(rowWa) == "" {
+		rowWa = wa
+	}
+	if err := s.notifyOnboardingPending(ctx, rowID, rowKind, rowEmail, rowWa, payloadMap); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"message": "Approval request sent on WhatsApp.",
+		"data": map[string]interface{}{
+			"id":     rowID,
+			"kind":   rowKind,
+			"status": "pending",
+		},
+	}, nil
+}
+
+func onboardingIdentityMatches(rowEmail, rowWa, email, wa string) bool {
+	if email != "" && strings.EqualFold(strings.TrimSpace(rowEmail), email) {
+		return true
+	}
+	rowDigits := normalizeWhatsApp(rowWa)
+	if wa != "" && rowDigits != "" && rowDigits == wa {
+		return true
+	}
+	return false
 }
 
 func (s *Service) sendOnboardingTemplate(ctx context.Context, phone, typeLabel, name, wa, email string, id int64, approve, view string) error {
