@@ -33,6 +33,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/onboarding/submit_facility", s.withOptionalAuth(s.handleSubmitFacility))
 	mux.HandleFunc("POST /v1/onboarding/submit_tournament", s.withOptionalAuth(s.handleSubmitTournament))
 	mux.HandleFunc("POST /v1/onboarding/submit_referee", s.withOptionalAuth(s.handleSubmitReferee))
+	mux.HandleFunc("POST /v1/onboarding/send_request", s.withOptionalAuth(s.handleSendOnboardingRequest))
 	mux.HandleFunc("GET /v1/onboarding/sports", s.withOptionalAuth(s.handleSports))
 	mux.HandleFunc("GET /v1/onboarding/manage", s.handleOnboardingManage)
 	mux.HandleFunc("POST /v1/onboarding/manage/approve", s.handleOnboardingManageApprove)
@@ -256,6 +257,40 @@ func (s *Server) handleSubmitTournament(w http.ResponseWriter, r *http.Request, 
 
 func (s *Server) handleSubmitReferee(w http.ResponseWriter, r *http.Request, ac *authCtx) {
 	s.submitKind(w, r, ac, "referee")
+}
+
+func (s *Server) handleSendOnboardingRequest(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	var body struct {
+		Kind           string `json:"kind"`
+		Email          string `json:"email"`
+		WhatsappNumber string `json:"whatsappNumber"`
+		ID             int64  `json:"id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	if body.Email == "" {
+		body.Email = ac.Email
+	}
+	out, err := s.Platform.SendPendingOnboardingAlert(r.Context(), body.Kind, body.Email, body.WhatsappNumber, body.ID)
+	if err != nil {
+		code := http.StatusBadRequest
+		msg := err.Error()
+		switch err.Error() {
+		case "not_pending":
+			code = http.StatusConflict
+			msg = "Send request is available only while status is pending."
+		case "not_found":
+			code = http.StatusNotFound
+			msg = "No pending onboarding request found."
+		case "no_alert_contacts":
+			msg = "No WhatsApp number is configured to receive this request."
+		}
+		writeJSON(w, code, map[string]string{"error": err.Error(), "message": msg})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleSports(w http.ResponseWriter, r *http.Request, ac *authCtx) {
