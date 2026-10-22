@@ -1510,7 +1510,52 @@ func nullInt(v int64) any {
 	return v
 }
 
+func (s *Service) registerStrollXToken(ctx context.Context, body map[string]any) (bool, string, any) {
+	action := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["action"])))
+	token := strings.TrimSpace(fmt.Sprint(body["token"]))
+	if token == "" || token == "<nil>" {
+		return false, "token required.", nil
+	}
+	_, _ = s.DB.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS strollx_device_tokens (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    BIGINT NOT NULL,
+  token      TEXT NOT NULL,
+  platform   VARCHAR(16) NOT NULL DEFAULT 'android',
+  status     VARCHAR(16) NOT NULL DEFAULT 'active',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, token)
+)`)
+	if action == "unregister" {
+		_, _ = s.DB.ExecContext(ctx, `DELETE FROM strollx_device_tokens WHERE token=$1`, token)
+		return true, "Token removed.", nil
+	}
+	uid, _ := strconv.ParseInt(fmt.Sprint(body["userId"]), 10, 64)
+	if uid <= 0 {
+		uid, _ = strconv.ParseInt(fmt.Sprint(body["user_id"]), 10, 64)
+	}
+	if uid <= 0 {
+		return false, "userId and token are required.", nil
+	}
+	platform := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["platform"])))
+	if platform == "" || platform == "<nil>" {
+		platform = "android"
+	}
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO strollx_device_tokens (user_id, token, platform, status)
+VALUES ($1,$2,$3,'active')
+ON CONFLICT (user_id, token) DO UPDATE
+SET platform=EXCLUDED.platform, status='active', updated_at=NOW()`, uid, token, platform)
+	if err != nil {
+		return false, err.Error(), nil
+	}
+	return true, "StrollX token registered.", map[string]any{"ok": true, "userId": uid, "app": "strollx"}
+}
+
 func (s *Service) FCMRegister(ctx context.Context, body map[string]any) (bool, string, any) {
+	if strings.EqualFold(strField(body, "app"), "strollx") {
+		return s.registerStrollXToken(ctx, body)
+	}
 	action := strings.ToLower(strings.TrimSpace(fmt.Sprint(body["action"])))
 	if action == "" {
 		action = "register"

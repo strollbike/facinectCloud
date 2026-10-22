@@ -158,12 +158,36 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 
 	if job.Channel == "push" || job.Channel == "both" {
 		if strollxInboxOnly(req) {
-			// Admin/subadmin booking alert stays in StrollX. Do not call FCM:
-			// those tokens belong to the Proximity app.
-			if providerRef != "" {
-				providerRef = providerRef + ",strollx:inbox"
+			// Staff alert uses StrollX tokens only. Proximity tokens stay unused.
+			var tokens []string
+			if req.To.UserID != nil && *req.To.UserID > 0 {
+				tokens, _ = s.ResolveStrollXTokens(ctx, *req.To.UserID)
+			}
+			if len(tokens) == 0 {
+				if providerRef != "" {
+					providerRef = providerRef + ",strollx:inbox"
+				} else {
+					providerRef = "strollx:inbox"
+				}
 			} else {
-				providerRef = "strollx:inbox"
+				req.To.DeviceTokens = tokens
+				ref, err := s.Push.Send(ctx, req)
+				if err != nil {
+					if providerRef != "" {
+						providerRef = providerRef + ",push_skip:" + err.Error()
+					} else {
+						providerRef = "push_skip:" + err.Error()
+					}
+				} else {
+					if providerRef != "" {
+						providerRef = providerRef + "," + ref
+					} else {
+						providerRef = ref
+					}
+					if strings.HasPrefix(ref, "dry_run:") && status == "sent" {
+						status = "dry_run"
+					}
+				}
 			}
 		} else {
 			waPhone := strings.TrimSpace(req.To.WhatsApp)
@@ -529,6 +553,48 @@ FROM notification_jobs WHERE id=$1`, id)
 	}
 	j.Payload = payload
 	return &j, nil
+}
+
+func (s *Service) ResolveStrollXTokens(ctx context.Context, userID int64) ([]string, error) {
+	if userID <= 0 {
+		return nil, nil
+	}
+	_, _ = s.DB.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS strollx_device_tokens (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    BIGINT NOT NULL,
+  token      TEXT NOT NULL,
+  platform   VARCHAR(16) NOT NULL DEFAULT 'android',
+  status     VARCHAR(16) NOT NULL DEFAULT 'active',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, token)
+)`)
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT token FROM strollx_device_tokens
+WHERE user_id=$1 AND status='active' AND token <> ''
+ORDER BY updated_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var tok string
+		if rows.Scan(&tok) != nil {
+			continue
+		}
+		tok = strings.TrimSpace(tok)
+		if tok == "" || len(tok) < 40 {
+			continue
+		}
+		if _, ok := seen[tok]; ok {
+			continue
+		}
+		seen[tok] = struct{}{}
+		out = append(out, tok)
+	}
+	return out, rows.Err()
 }
 
 func (s *Service) RegisterDevice(ctx context.Context, userID int64, token, platform string) error {
