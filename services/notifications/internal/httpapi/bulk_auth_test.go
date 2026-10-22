@@ -14,10 +14,12 @@ import (
 
 	"github.com/facinect/notifications/internal/authn"
 	"github.com/facinect/notifications/internal/config"
+	"github.com/facinect/notifications/internal/testreport"
 	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestStaffMayNotify(t *testing.T) {
+	defer testreport.Done(t, "Class-over roles that may notify")
 	for _, role := range []string{"admin", "sub_admin", "subadmin", "coach", "headcoach", "head_coach", " Coach "} {
 		if !staffMayNotify(role) {
 			t.Fatalf("expected %q to notify", role)
@@ -31,6 +33,7 @@ func TestStaffMayNotify(t *testing.T) {
 }
 
 func TestStaffBulkStatusUsesLoginRole(t *testing.T) {
+	defer testreport.Done(t, "Class-over send uses the login role")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)

@@ -12,19 +12,19 @@ import (
 )
 
 type Service struct {
-	DB  *sql.DB
-	Cfg config.Config
-	WA  *WhatsAppClient
+	DB   *sql.DB
+	Cfg  config.Config
+	WA   *WhatsAppClient
 	Push *PushClient
 }
 
 type SendRequest struct {
-	Channel      string                 `json:"channel"`
-	FacilityID   *int64                 `json:"facility_id"`
-	TemplateKey  string                 `json:"template"`
-	To           SendTo                 `json:"to"`
-	Data         map[string]interface{} `json:"data"`
-	Priority     string                 `json:"priority"`
+	Channel     string                 `json:"channel"`
+	FacilityID  *int64                 `json:"facility_id"`
+	TemplateKey string                 `json:"template"`
+	To          SendTo                 `json:"to"`
+	Data        map[string]interface{} `json:"data"`
+	Priority    string                 `json:"priority"`
 }
 
 type SendTo struct {
@@ -157,90 +157,100 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 	}
 
 	if job.Channel == "push" || job.Channel == "both" {
-		waPhone := strings.TrimSpace(req.To.WhatsApp)
-		// Facinect NotifyDispatch: phone → app_users.id when user_id omitted
-		// OR when tokens missing for the given id (clients sometimes send
-		// synthetic / stale user_ids from booking views).
-		if waPhone != "" {
-			needPhoneResolve := req.To.UserID == nil || *req.To.UserID <= 0
-			if !needPhoneResolve && len(req.To.DeviceTokens) == 0 {
-				toks, _ := s.ResolveDeviceTokens(ctx, *req.To.UserID)
-				needPhoneResolve = len(toks) == 0
-			}
-			if needPhoneResolve {
-				if uid := s.ResolveUserIDByPhone(ctx, waPhone); uid > 0 {
-					req.To.UserID = &uid
-				}
-			}
-		}
-		pushErr := error(nil)
-		if len(req.To.DeviceTokens) == 0 && req.To.UserID != nil && *req.To.UserID > 0 {
-			tokens, err := s.ResolveDeviceTokens(ctx, *req.To.UserID)
-			if err != nil {
-				pushErr = err
-			} else if len(tokens) == 0 {
-				pushErr = fmt.Errorf("no_device_tokens_for_user")
-			} else {
-				req.To.DeviceTokens = tokens
-			}
-		}
-		if pushErr == nil && len(req.To.DeviceTokens) == 0 {
-			pushErr = fmt.Errorf("device_token_required")
-		}
-		if pushErr == nil {
-			ref, err := s.Push.Send(ctx, req)
-			if err != nil {
-				pushErr = err
-			} else {
-				if providerRef != "" {
-					providerRef = providerRef + "," + ref
-				} else {
-					providerRef = ref
-				}
-				if strings.HasPrefix(ref, "dry_run:") && status == "sent" {
-					status = "dry_run"
-				}
-				// Inbox (Facinect appPush) when we know the end user.
-				if req.To.UserID != nil && *req.To.UserID > 0 {
-					fid := int64(0)
-					if req.FacilityID != nil {
-						fid = *req.FacilityID
-					}
-					title, body := titleBodyFromData(req)
-					_ = s.writeAppNotification(ctx, *req.To.UserID, fid, title, body, req.TemplateKey, map[string]interface{}{
-						"source":   "notifications_send",
-						"job_id":   job.ID,
-						"channel":  job.Channel,
-						"template": req.TemplateKey,
-					})
-				}
-			}
-		}
-		if pushErr != nil {
-			waSkipped := strings.Contains(providerRef, "wa_skip:")
-			// Push-only, or both with no WhatsApp attempt → push must succeed.
-			if job.Channel == "push" || waSkipped {
-				lastErr = pushErr
-				status = "failed"
-			} else if lastErr == nil && status == "sent" {
-				// WhatsApp already delivered — soft-skip missing FCM token.
-				if providerRef != "" {
-					providerRef = providerRef + ",push_skip:" + pushErr.Error()
-				} else {
-					providerRef = "push_skip:" + pushErr.Error()
-				}
-			} else if lastErr == nil {
-				lastErr = pushErr
-				status = "failed"
-			}
-		} else if job.Channel == "both" && status == "failed" {
-			// WhatsApp failed but push delivered — treat as sent with WA error retained.
-			status = "sent"
-			lastErr = nil
+		if strollxInboxOnly(req) {
+			// Admin/subadmin booking alert stays in StrollX. Do not call FCM:
+			// those tokens belong to the Proximity app.
 			if providerRef != "" {
-				providerRef = providerRef + ",wa_failed"
+				providerRef = providerRef + ",strollx:inbox"
 			} else {
-				providerRef = "wa_failed"
+				providerRef = "strollx:inbox"
+			}
+		} else {
+			waPhone := strings.TrimSpace(req.To.WhatsApp)
+			// Facinect NotifyDispatch: phone → app_users.id when user_id omitted
+			// OR when tokens missing for the given id (clients sometimes send
+			// synthetic / stale user_ids from booking views).
+			if waPhone != "" {
+				needPhoneResolve := req.To.UserID == nil || *req.To.UserID <= 0
+				if !needPhoneResolve && len(req.To.DeviceTokens) == 0 {
+					toks, _ := s.ResolveDeviceTokens(ctx, *req.To.UserID)
+					needPhoneResolve = len(toks) == 0
+				}
+				if needPhoneResolve {
+					if uid := s.ResolveUserIDByPhone(ctx, waPhone); uid > 0 {
+						req.To.UserID = &uid
+					}
+				}
+			}
+			pushErr := error(nil)
+			if len(req.To.DeviceTokens) == 0 && req.To.UserID != nil && *req.To.UserID > 0 {
+				tokens, err := s.ResolveDeviceTokens(ctx, *req.To.UserID)
+				if err != nil {
+					pushErr = err
+				} else if len(tokens) == 0 {
+					pushErr = fmt.Errorf("no_device_tokens_for_user")
+				} else {
+					req.To.DeviceTokens = tokens
+				}
+			}
+			if pushErr == nil && len(req.To.DeviceTokens) == 0 {
+				pushErr = fmt.Errorf("device_token_required")
+			}
+			if pushErr == nil {
+				ref, err := s.Push.Send(ctx, req)
+				if err != nil {
+					pushErr = err
+				} else {
+					if providerRef != "" {
+						providerRef = providerRef + "," + ref
+					} else {
+						providerRef = ref
+					}
+					if strings.HasPrefix(ref, "dry_run:") && status == "sent" {
+						status = "dry_run"
+					}
+					// Inbox (Facinect appPush) when we know the end user.
+					if req.To.UserID != nil && *req.To.UserID > 0 {
+						fid := int64(0)
+						if req.FacilityID != nil {
+							fid = *req.FacilityID
+						}
+						title, body := titleBodyFromData(req)
+						_ = s.writeAppNotification(ctx, *req.To.UserID, fid, title, body, req.TemplateKey, map[string]interface{}{
+							"source":   "notifications_send",
+							"job_id":   job.ID,
+							"channel":  job.Channel,
+							"template": req.TemplateKey,
+						})
+					}
+				}
+			}
+			if pushErr != nil {
+				waSkipped := strings.Contains(providerRef, "wa_skip:")
+				// Push-only, or both with no WhatsApp attempt → push must succeed.
+				if job.Channel == "push" || waSkipped {
+					lastErr = pushErr
+					status = "failed"
+				} else if lastErr == nil && status == "sent" {
+					// WhatsApp already delivered — soft-skip missing FCM token.
+					if providerRef != "" {
+						providerRef = providerRef + ",push_skip:" + pushErr.Error()
+					} else {
+						providerRef = "push_skip:" + pushErr.Error()
+					}
+				} else if lastErr == nil {
+					lastErr = pushErr
+					status = "failed"
+				}
+			} else if job.Channel == "both" && status == "failed" {
+				// WhatsApp failed but push delivered — treat as sent with WA error retained.
+				status = "sent"
+				lastErr = nil
+				if providerRef != "" {
+					providerRef = providerRef + ",wa_failed"
+				} else {
+					providerRef = "wa_failed"
+				}
 			}
 		}
 	}
@@ -278,6 +288,19 @@ WHERE id=$1`, job.ID, status, nullStr(providerRef), nullStr(errText)); err != ni
 		out.ErrorText = errText
 	}
 	return out, nil
+}
+
+// strollxInboxOnly is a booking alert for the StrollX admin or subadmin login.
+// It must not be delivered through Proximity FCM tokens or app_notifications.
+func strollxInboxOnly(req SendRequest) bool {
+	if strings.EqualFold(strings.TrimSpace(req.TemplateKey), "booking_staff_notify") {
+		return true
+	}
+	if req.Data == nil {
+		return false
+	}
+	app, _ := req.Data["app"].(string)
+	return strings.EqualFold(strings.TrimSpace(app), "strollx")
 }
 
 func titleBodyFromData(req SendRequest) (string, string) {

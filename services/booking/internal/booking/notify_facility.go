@@ -96,27 +96,13 @@ WHERE m.facility_id=$1 AND m.status='active' AND m.user_id>0
 		if rows.Scan(&staffID) != nil || staffID <= 0 {
 			continue
 		}
-		targets := []int64{staffID}
-		mapped, merr := s.DB.QueryContext(ctx, `
-SELECT DISTINCT users_user_id FROM app_fcm_audience_map
-WHERE audience='management' AND role_id=$1 AND users_user_id>0`, staffID)
-		if merr == nil {
-			for mapped.Next() {
-				var appUser int64
-				if mapped.Scan(&appUser) == nil && appUser > 0 {
-					targets = append(targets, appUser)
-				}
-			}
-			mapped.Close()
+		// StrollX login only. Do not map this user onto a Proximity app account.
+		if _, ok := seen[staffID]; ok {
+			continue
 		}
-		for _, uid := range targets {
-			if _, ok := seen[uid]; ok {
-				continue
-			}
-			seen[uid] = struct{}{}
-			if err := s.sendStaffPush(ctx, facilityID, uid, title, body, bookingID); err != nil {
-				log.Printf("facility staff push: facility=%d user=%d err=%v", facilityID, uid, err)
-			}
+		seen[staffID] = struct{}{}
+		if err := s.sendStaffPush(ctx, facilityID, staffID, title, body, bookingID); err != nil {
+			log.Printf("facility staff push: facility=%d user=%d err=%v", facilityID, staffID, err)
 		}
 	}
 }
@@ -137,6 +123,7 @@ func (s *Service) sendStaffPush(ctx context.Context, facilityID, userID int64, t
 			"type":      "booking_staff_notify",
 			"bookingId": fmt.Sprintf("%d", bookingID),
 			"audience":  "management",
+			"app":       "strollx",
 		},
 	}
 	raw, _ := json.Marshal(payload)
