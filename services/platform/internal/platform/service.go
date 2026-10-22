@@ -337,10 +337,10 @@ func (s *Service) SubmitOnboarding(ctx context.Context, kind string, in SubmitIn
 			"error":   ErrDuplicateOnboarding.Error(),
 			"message": "Already submitted — wait for approval.",
 			"data": map[string]interface{}{
-				"id":           dupID,
-				"kind":         kind,
-				"matched_by":   field,
-				"existing_id":  dupID,
+				"id":          dupID,
+				"kind":        kind,
+				"matched_by":  field,
+				"existing_id": dupID,
 			},
 		}, ErrDuplicateOnboarding
 	}
@@ -530,6 +530,9 @@ RETURNING id`, facilityID, sportName, i, catalogID).Scan(&sportPK)
 				if err != nil {
 					continue
 				}
+				if err := linkProximitySport(ctx, tx, facilityID, catalogID, sportName); err != nil {
+					return 0, 0, fmt.Errorf("app_facility_sport: %w", err)
+				}
 				subs, _ := sm["subs"].([]interface{})
 				if len(subs) == 0 {
 					subs, _ = sm["courts"].([]interface{})
@@ -633,6 +636,35 @@ ON CONFLICT (court_id, slot_date, start_time) DO NOTHING`,
 		}
 	}
 	return created, nil
+}
+
+// linkProximitySport writes the catalog sport Proximity reads.
+// facility_sports.id is the staff row and must not be stored here.
+func linkProximitySport(ctx context.Context, tx *sql.Tx, facilityID int64, catalogID *int64, sportName string) error {
+	if catalogID != nil && *catalogID > 0 {
+		res, err := tx.ExecContext(ctx, `
+INSERT INTO app_facility_sports (facility_id, sport_id)
+SELECT $1, s.id FROM app_sports s WHERE s.id=$2
+ON CONFLICT DO NOTHING`, facilityID, *catalogID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return nil
+		}
+	}
+	name := strings.TrimSpace(sportName)
+	if name == "" || name == "<nil>" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `
+INSERT INTO app_facility_sports (facility_id, sport_id)
+SELECT $1, s.id FROM app_sports s
+WHERE lower(s.name)=lower($2)
+ORDER BY s.id
+LIMIT 1
+ON CONFLICT DO NOTHING`, facilityID, name)
+	return err
 }
 
 func nullIfEmpty(v string) interface{} {
@@ -968,17 +1000,17 @@ SELECT version, pages_enabled FROM platform_controls_version WHERE facility_id=$
 // --- Privacy ---
 
 type PrivacyIn struct {
-	Action         string          `json:"action"`
-	FacilityID     int64           `json:"facilityId"`
-	UserID         int64           `json:"userId"`
-	Email          string          `json:"email"`
-	WhatsappNo     string          `json:"whatsappNo"`
-	Text           string          `json:"text"`
-	Version        string          `json:"version"`
-	PolicyType     string          `json:"policyType"`
-	PolicyVersion  string          `json:"policyVersion"`
-	Source         string          `json:"source"`
-	Payload        json.RawMessage `json:"payload"`
+	Action        string          `json:"action"`
+	FacilityID    int64           `json:"facilityId"`
+	UserID        int64           `json:"userId"`
+	Email         string          `json:"email"`
+	WhatsappNo    string          `json:"whatsappNo"`
+	Text          string          `json:"text"`
+	Version       string          `json:"version"`
+	PolicyType    string          `json:"policyType"`
+	PolicyVersion string          `json:"policyVersion"`
+	Source        string          `json:"source"`
+	Payload       json.RawMessage `json:"payload"`
 }
 
 const platformUsersVersion = "1.0"
