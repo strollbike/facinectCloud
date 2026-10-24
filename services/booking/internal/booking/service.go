@@ -181,7 +181,62 @@ WHERE s.facility_id=$1 AND s.slot_date=$2::date`
 		return nil, err
 	}
 	defer rows.Close()
-	return scanSlots(rows)
+	list, err := scanSlots(rows)
+	if err != nil {
+		return nil, err
+	}
+	// Past free inventory is not shown. Booked and blocked rows stay.
+	return omitPastFreeSlots(list, time.Now().In(s.slotLocation())), nil
+}
+
+// freeSlotHideLead removes today's free slots this long before they end.
+const freeSlotHideLead = 15 * time.Minute
+
+// omitPastFreeSlots drops available slots that have ended, and today's free slots
+// in the last 15 minutes before end. Blocked and booked slots are kept.
+func omitPastFreeSlots(slots []Slot, now time.Time) []Slot {
+	out := make([]Slot, 0, len(slots))
+	for _, slot := range slots {
+		if strings.EqualFold(slot.Status, "available") && slotEnded(slot.SlotDate, slot.EndTime, now) {
+			continue
+		}
+		out = append(out, slot)
+	}
+	return out
+}
+
+func slotEnded(date, end string, now time.Time) bool {
+	d := strings.TrimSpace(date)
+	if len(d) >= 10 {
+		d = d[:10]
+	}
+	today := now.Format("2006-01-02")
+	if d == "" || d > today {
+		return false
+	}
+	if d < today {
+		return true
+	}
+	e := clockHHMMSS(end)
+	if e == "" {
+		return false
+	}
+	endAt, err := time.ParseInLocation("2006-01-02 15:04:05", d+" "+e, now.Location())
+	if err != nil {
+		return false
+	}
+	return !endAt.After(now.Add(freeSlotHideLead))
+}
+
+func clockHHMMSS(end string) string {
+	e := strings.TrimSpace(end)
+	if len(e) >= 8 {
+		return e[:8]
+	}
+	if len(e) == 5 {
+		return e + ":00"
+	}
+	return ""
 }
 
 

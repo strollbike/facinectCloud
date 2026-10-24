@@ -622,6 +622,9 @@ ORDER BY court_name, time_range`, facilityID, sportID, date)
 		var court, d, tr, st string
 		var held sql.NullInt64
 		_ = rows.Scan(&fid, &sid, &court, &d, &tr, &st, &held)
+		if pastFreeSlot(d, st, timeRangeEnd(tr), time.Now().In(bookingTZ())) {
+			continue
+		}
 		item := map[string]any{
 			"facilityId": fid, "sportId": sid, "courtName": court,
 			"date": d, "timeRange": tr, "status": strings.ToLower(st),
@@ -655,16 +658,22 @@ ORDER BY c.name, s.start_time`, facilityID, date, sportID)
 	}
 	defer rows.Close()
 	list := []map[string]any{}
+	saw := false
+	now := time.Now().In(bookingTZ())
 	for rows.Next() {
 		var fid, sid int64
 		var court, d, tr, st string
 		if rows.Scan(&fid, &sid, &court, &d, &tr, &st) != nil {
 			continue
 		}
+		saw = true
 		st = strings.ToLower(strings.TrimSpace(st))
 		// Consumer UI uses onhold; staff payment-hold uses held.
 		if st == "held" {
 			st = "onhold"
+		}
+		if pastFreeSlot(d, st, timeRangeEnd(tr), now) {
+			continue
 		}
 		list = append(list, map[string]any{
 			"facilityId": fid, "sportId": sid, "courtName": court,
@@ -672,7 +681,53 @@ ORDER BY c.name, s.start_time`, facilityID, date, sportID)
 			"held_by_userId": 0, "heldByUserId": 0,
 		})
 	}
-	return list, len(list) > 0
+	return list, saw
+}
+
+func timeRangeEnd(tr string) string {
+	parts := strings.Split(tr, "-")
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[len(parts)-1])
+}
+
+// freeSlotHideLead removes today's free slots this long before they end.
+const freeSlotHideLead = 15 * time.Minute
+
+// pastFreeSlot is true for free inventory that has ended, or that ends within 15 minutes.
+// Booked and blocked stay.
+func pastFreeSlot(date, status, end string, now time.Time) bool {
+	st := strings.ToLower(strings.TrimSpace(status))
+	if st != "available" && st != "free" {
+		return false
+	}
+	d := strings.TrimSpace(date)
+	if len(d) >= 10 {
+		d = d[:10]
+	}
+	today := now.Format("2006-01-02")
+	if d == "" || d > today {
+		return false
+	}
+	if d < today {
+		return true
+	}
+	e := strings.TrimSpace(end)
+	if len(e) == 5 {
+		e += ":00"
+	}
+	if len(e) >= 8 {
+		e = e[:8]
+	}
+	if e == "" {
+		return false
+	}
+	endAt, err := time.ParseInLocation("2006-01-02 15:04:05", d+" "+e, now.Location())
+	if err != nil {
+		return false
+	}
+	return !endAt.After(now.Add(freeSlotHideLead))
 }
 
 func (s *Service) overlayAppHolds(ctx context.Context, facilityID, sportID int64, date string, list []map[string]any) {
