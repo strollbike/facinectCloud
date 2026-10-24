@@ -75,11 +75,14 @@ CREATE TABLE IF NOT EXISTS device_tokens (
                 CHECK (platform IN ('android','ios','web')),
   status        VARCHAR(16) NOT NULL DEFAULT 'active'
                 CHECK (status IN ('active','disabled')),
+  app           VARCHAR(16) NOT NULL DEFAULT 'proximity'
+                CHECK (app IN ('proximity','strollx')),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (user_id, token)
 );
 CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
+ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS app VARCHAR(16) NOT NULL DEFAULT 'proximity';
 
 CREATE TABLE IF NOT EXISTS facility_whatsapp_config (
   facility_id            BIGINT PRIMARY KEY,

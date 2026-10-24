@@ -253,12 +253,13 @@ func (s *Server) handleRegisterDevice(w http.ResponseWriter, r *http.Request) {
 		UserID   int64  `json:"user_id"`
 		Token    string `json:"token"`
 		Platform string `json:"platform"`
+		App      string `json:"app"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
 		return
 	}
-	if err := s.Notify.RegisterDevice(r.Context(), body.UserID, body.Token, body.Platform); err != nil {
+	if err := s.Notify.RegisterDevice(r.Context(), body.UserID, body.Token, body.Platform, body.App); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

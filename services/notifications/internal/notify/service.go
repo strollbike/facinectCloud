@@ -157,23 +157,16 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 	}
 
 	if job.Channel == "push" || job.Channel == "both" {
-		if strollxInboxOnly(req) {
-			// Admin/subadmin booking alert stays in StrollX. Do not call FCM:
-			// those tokens belong to the Proximity app.
-			if providerRef != "" {
-				providerRef = providerRef + ",strollx:inbox"
-			} else {
-				providerRef = "strollx:inbox"
-			}
-		} else {
+		{
+			targetApp := pushTargetApp(req)
 			waPhone := strings.TrimSpace(req.To.WhatsApp)
 			// Facinect NotifyDispatch: phone → app_users.id when user_id omitted
 			// OR when tokens missing for the given id (clients sometimes send
 			// synthetic / stale user_ids from booking views).
-			if waPhone != "" {
+			if waPhone != "" && targetApp != "strollx" {
 				needPhoneResolve := req.To.UserID == nil || *req.To.UserID <= 0
 				if !needPhoneResolve && len(req.To.DeviceTokens) == 0 {
-					toks, _ := s.ResolveDeviceTokens(ctx, *req.To.UserID)
+					toks, _ := s.ResolveDeviceTokensForApp(ctx, *req.To.UserID, targetApp)
 					needPhoneResolve = len(toks) == 0
 				}
 				if needPhoneResolve {
@@ -184,7 +177,7 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 			}
 			pushErr := error(nil)
 			if len(req.To.DeviceTokens) == 0 && req.To.UserID != nil && *req.To.UserID > 0 {
-				tokens, err := s.ResolveDeviceTokens(ctx, *req.To.UserID)
+				tokens, err := s.ResolveDeviceTokensForApp(ctx, *req.To.UserID, targetApp)
 				if err != nil {
 					pushErr = err
 				} else if len(tokens) == 0 {
@@ -209,8 +202,8 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 					if strings.HasPrefix(ref, "dry_run:") && status == "sent" {
 						status = "dry_run"
 					}
-					// Inbox (Facinect appPush) when we know the end user.
-					if req.To.UserID != nil && *req.To.UserID > 0 {
+					// Proximity inbox only. StrollX staff ids are not app_users.
+					if req.To.UserID != nil && *req.To.UserID > 0 && targetApp != "strollx" {
 						fid := int64(0)
 						if req.FacilityID != nil {
 							fid = *req.FacilityID
@@ -290,17 +283,26 @@ WHERE id=$1`, job.ID, status, nullStr(providerRef), nullStr(errText)); err != ni
 	return out, nil
 }
 
-// strollxInboxOnly is a booking alert for the StrollX admin or subadmin login.
-// It must not be delivered through Proximity FCM tokens or app_notifications.
-func strollxInboxOnly(req SendRequest) bool {
+// pushTargetApp picks which app's FCM tokens may receive this push.
+// Staff booking alerts go to StrollX. Customer alerts stay on Proximity.
+func pushTargetApp(req SendRequest) string {
 	if strings.EqualFold(strings.TrimSpace(req.TemplateKey), "booking_staff_notify") {
-		return true
+		return "strollx"
 	}
-	if req.Data == nil {
-		return false
+	if req.Data != nil {
+		app, _ := req.Data["app"].(string)
+		if strings.EqualFold(strings.TrimSpace(app), "strollx") {
+			return "strollx"
+		}
 	}
-	app, _ := req.Data["app"].(string)
-	return strings.EqualFold(strings.TrimSpace(app), "strollx")
+	return "proximity"
+}
+
+func normalizePushApp(app string) string {
+	if strings.EqualFold(strings.TrimSpace(app), "strollx") {
+		return "strollx"
+	}
+	return "proximity"
 }
 
 func titleBodyFromData(req SendRequest) (string, string) {
@@ -531,9 +533,10 @@ FROM notification_jobs WHERE id=$1`, id)
 	return &j, nil
 }
 
-func (s *Service) RegisterDevice(ctx context.Context, userID int64, token, platform string) error {
+func (s *Service) RegisterDevice(ctx context.Context, userID int64, token, platform, app string) error {
 	token = strings.TrimSpace(token)
 	platform = strings.ToLower(strings.TrimSpace(platform))
+	app = normalizePushApp(app)
 	if userID <= 0 || token == "" {
 		return fmt.Errorf("invalid_device")
 	}
@@ -543,14 +546,20 @@ func (s *Service) RegisterDevice(ctx context.Context, userID int64, token, platf
 	if platform != "android" && platform != "ios" && platform != "web" {
 		return fmt.Errorf("invalid_platform")
 	}
+	s.ensureDeviceTokenApp(ctx)
 	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO device_tokens (user_id, token, platform, status)
-VALUES ($1, $2, $3, 'active')
+INSERT INTO device_tokens (user_id, token, platform, status, app)
+VALUES ($1, $2, $3, 'active', $4)
 ON CONFLICT (user_id, token) DO UPDATE
-SET platform=EXCLUDED.platform, status='active', updated_at=NOW()`,
-		userID, token, platform)
+SET platform=EXCLUDED.platform, status='active', app=EXCLUDED.app, updated_at=NOW()`,
+		userID, token, platform, app)
 	if err != nil {
 		return err
+	}
+	if app == "strollx" {
+		// Staff tokens must not be delivered as Proximity customer pushes.
+		_, _ = s.DB.ExecContext(ctx, `DELETE FROM app_fcm_devices WHERE token=$1`, token)
+		return nil
 	}
 	// Keep proximity app_fcm_devices in sync (same DB).
 	_, _ = s.DB.ExecContext(ctx, `
@@ -562,12 +571,23 @@ SET user_id=EXCLUDED.user_id, platform=EXCLUDED.platform, updated_at=NOW()`,
 	return nil
 }
 
-// ResolveDeviceTokens loads active FCM tokens for a user from device_tokens
-// and app_fcm_devices (proximity registers into both paths).
+func (s *Service) ensureDeviceTokenApp(ctx context.Context) {
+	_, _ = s.DB.ExecContext(ctx, `
+ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS app VARCHAR(16) NOT NULL DEFAULT 'proximity'`)
+}
+
+// ResolveDeviceTokens loads Proximity tokens. StrollX staff tokens are excluded.
 func (s *Service) ResolveDeviceTokens(ctx context.Context, userID int64) ([]string, error) {
+	return s.ResolveDeviceTokensForApp(ctx, userID, "proximity")
+}
+
+// ResolveDeviceTokensForApp loads active FCM tokens for one app.
+// Proximity also reads app_fcm_devices. StrollX reads device_tokens.app only.
+func (s *Service) ResolveDeviceTokensForApp(ctx context.Context, userID int64, app string) ([]string, error) {
 	if userID <= 0 {
 		return nil, nil
 	}
+	app = normalizePushApp(app)
 	seen := map[string]struct{}{}
 	var out []string
 	add := func(tok string) {
@@ -584,8 +604,8 @@ func (s *Service) ResolveDeviceTokens(ctx context.Context, userID int64) ([]stri
 
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT token FROM device_tokens
-WHERE user_id=$1 AND status='active' AND token <> ''
-ORDER BY updated_at DESC`, userID)
+WHERE user_id=$1 AND status='active' AND token <> '' AND app=$2
+ORDER BY updated_at DESC`, userID, app)
 	if err != nil {
 		return nil, err
 	}
@@ -602,10 +622,17 @@ ORDER BY updated_at DESC`, userID)
 		return nil, err
 	}
 
+	if app != "proximity" {
+		return out, nil
+	}
 	rows2, err := s.DB.QueryContext(ctx, `
-SELECT token FROM app_fcm_devices
-WHERE user_id=$1 AND token <> ''
-ORDER BY updated_at DESC`, userID)
+SELECT d.token FROM app_fcm_devices d
+WHERE d.user_id=$1 AND d.token <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM device_tokens t
+    WHERE t.token = d.token AND t.app = 'strollx' AND t.status = 'active'
+  )
+ORDER BY d.updated_at DESC`, userID)
 	if err != nil {
 		// Table may not exist on older DBs — ignore.
 		if !strings.Contains(err.Error(), "does not exist") {
