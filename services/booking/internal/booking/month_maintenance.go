@@ -112,11 +112,18 @@ func (s *Service) slotLocation() *time.Location {
 // slots for all facilities. Booked rows and other blocks (Membership, Maintenance)
 // are kept. The recurring Active block rule stays, so future coaching dates
 // continue to be generated. Uses BOOKING_SLOT_TIMEZONE (default Asia/Kolkata).
-// Also drops today's matching slots whose end_time has already passed in that TZ.
+// Also drops today's free slots from 15 minutes before end_time (Asia/Kolkata by default).
+// Coaching blocks are removed only after they have actually ended.
 func (s *Service) CleanupPastAvailableSlots(ctx context.Context) (int, error) {
 	now := time.Now().In(s.slotLocation())
 	today := now.Format("2006-01-02")
 	clock := now.Format("15:04:05")
+	freeCutoff := now.Add(freeSlotHideLead)
+	freeClock := freeCutoff.Format("15:04:05")
+	if freeCutoff.Format("2006-01-02") != today {
+		// Within 15 minutes of midnight every slot ending today is inside the window.
+		freeClock = "24:00:00"
+	}
 
 	res, err := s.DB.ExecContext(ctx, `
 DELETE FROM booking_slots s
@@ -126,7 +133,7 @@ WHERE s.status = 'available'
     OR (s.slot_date = $1::date AND s.end_time <= $2::time)
   )
   AND NOT EXISTS (SELECT 1 FROM booking_bookings b WHERE b.slot_id = s.id)`,
-		today, clock)
+		today, freeClock)
 	if err != nil {
 		return 0, err
 	}
@@ -134,8 +141,15 @@ WHERE s.status = 'available'
 
 	res2, err := s.DB.ExecContext(ctx, `
 DELETE FROM app_slots
-WHERE slot_date < $1::date
-  AND LOWER(status) = 'available'`, today)
+WHERE LOWER(status) IN ('available', 'free')
+  AND (
+    slot_date < $1::date
+    OR (
+      slot_date = $1::date
+      AND time_range ~ '^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$'
+      AND split_part(time_range, '-', 2)::time <= $2::time
+    )
+  )`, today, freeClock)
 	if err == nil {
 		n2, _ := res2.RowsAffected()
 		n += n2

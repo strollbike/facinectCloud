@@ -273,6 +273,12 @@ WHERE fc.facility_id=$1 AND fc.status='active'
 // ensureSlotsForDay materializes slots from staff schedules (facility_sport_schedules /
 // facility_courts / booking_courts), refreshing available rows to match open/close.
 func (s *Service) ensureSlotsForDay(ctx context.Context, facilityID, sportID int64, date string) {
+	now := time.Now().In(bookingTZ())
+	today := now.Format("2006-01-02")
+	// Past days keep booked and blocked rows only. Do not recreate free inventory.
+	if len(date) >= 10 && date[:10] < today {
+		return
+	}
 	schedules := s.loadCourtSchedules(ctx, facilityID, sportID, date)
 	if len(schedules) == 0 {
 		return
@@ -286,6 +292,9 @@ WHERE facility_id=$1 AND sport_id=$2 AND slot_date=$3::date
 
 	for _, sc := range schedules {
 		for _, tr := range rangesFromSchedule(sc.OpenMinutes, sc.CloseMinutes, sc.SlotMinutes) {
+			if pastFreeSlot(date, "available", timeRangeEnd(tr), now) {
+				continue
+			}
 			_, _ = s.DB.ExecContext(ctx, `
 INSERT INTO app_slots (facility_id, sport_id, court_name, slot_date, time_range, status)
 VALUES ($1,$2,$3,$4::date,$5,'available')
