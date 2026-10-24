@@ -33,6 +33,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/notifications/whatsapp/lookup", s.withAuth(s.handleLookupByPhone))
 	mux.HandleFunc("GET /v1/notifications/history", s.withAuth(s.handleHistory))
 	mux.HandleFunc("GET /v1/notifications/inbox", s.withInboxAuth(s.handleInbox))
+	mux.HandleFunc("POST /v1/notifications/inbox/delete", s.withInboxAuth(s.handleDeleteInbox))
 	mux.HandleFunc("GET /v1/notifications/{id}", s.withAuth(s.handleGetJob))
 	mux.HandleFunc("POST /v1/notifications/devices", s.withAuth(s.handleRegisterDevice))
 	return s.withCORS(mux)
@@ -387,6 +388,28 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+}
+
+func (s *Server) handleDeleteInbox(w http.ResponseWriter, r *http.Request) {
+	uid := s.bearerUserID(r)
+	if uid <= 0 {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	var body struct {
+		IDs       []int64 `json:"ids"`
+		DeleteAll bool    `json:"deleteAll"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	n, err := s.Notify.DeleteInbox(r.Context(), uid, body.IDs, body.DeleteAll)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "deleted": n})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
