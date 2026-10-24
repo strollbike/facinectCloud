@@ -1602,12 +1602,34 @@ SELECT COUNT(DISTINCT token) FROM app_fcm_devices WHERE user_id=$1 AND token<>''
 	if platform == "" {
 		platform = "android"
 	}
+	pushApp := "proximity"
+	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(body["app"])), "strollx") {
+		pushApp = "strollx"
+	}
 	deviceID := strField(body, "deviceId")
 	if deviceID == "" {
 		deviceID = strField(body, "device_id")
 	}
 	syncRoles := parseSyncRoles(body)
 	s.ensureFCMAudienceMap(ctx)
+	_, _ = s.DB.ExecContext(ctx, `
+ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS app VARCHAR(16) NOT NULL DEFAULT 'proximity'`)
+	if pushApp == "strollx" {
+		// StrollX login id is not an app_users id. Keep the token out of Proximity.
+		_, _ = s.DB.ExecContext(ctx, `DELETE FROM app_fcm_devices WHERE token=$1`, token)
+		_, err := s.DB.ExecContext(ctx, `
+INSERT INTO device_tokens (user_id, token, platform, status, app)
+VALUES ($1, $2, $3, 'active', 'strollx')
+ON CONFLICT (user_id, token) DO UPDATE
+SET platform=EXCLUDED.platform, status='active', app='strollx', updated_at=NOW()`,
+			uid, token, platform)
+		if err != nil {
+			return false, err.Error(), nil
+		}
+		return true, "FCM token registered.", map[string]any{
+			"ok": true, "userId": uid, "app": "strollx",
+		}
+	}
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO app_fcm_devices (user_id, token, platform, device_id, updated_at)
 VALUES ($1,$2,$3,$4,NOW())
@@ -1616,12 +1638,11 @@ ON CONFLICT (token) DO UPDATE SET user_id=EXCLUDED.user_id, platform=EXCLUDED.pl
 	if err != nil {
 		return false, err.Error(), nil
 	}
-	// Mirror into notifications.device_tokens so StrollX user_id push resolves.
 	_, _ = s.DB.ExecContext(ctx, `
-INSERT INTO device_tokens (user_id, token, platform, status)
-VALUES ($1, $2, $3, 'active')
+INSERT INTO device_tokens (user_id, token, platform, status, app)
+VALUES ($1, $2, $3, 'active', 'proximity')
 ON CONFLICT (user_id, token) DO UPDATE
-SET platform=EXCLUDED.platform, status='active', updated_at=NOW()`,
+SET platform=EXCLUDED.platform, status='active', app='proximity', updated_at=NOW()`,
 		uid, token, platform)
 
 	s.upsertFCMAudience(ctx, fcmAudienceUser, uid, uid, "")

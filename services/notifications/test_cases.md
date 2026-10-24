@@ -1,9 +1,13 @@
 # Notifications test cases
 
-Updated: 2026-10-22T16:49:41Z
+Updated: 2026-10-24T02:40:07Z
 
 | Title | Test | Result |
 |---|---|---|
+| Customer alert uses Proximity tokens | `TestPushTargetApp/Customer_alert_uses_Proximity_tokens` | pass |
+| Staff alert uses StrollX tokens | `TestPushTargetApp/Staff_alert_uses_StrollX_tokens` | pass |
+| StrollX app flag | `TestPushTargetApp/StrollX_app_flag` | pass |
+| WhatsApp template stays Proximity | `TestPushTargetApp/WhatsApp_template_stays_Proximity` | pass |
 | Class-over send uses the login role | `TestStaffBulkStatusUsesLoginRole` | pass |
 | Class-over roles that may notify | `TestStaffMayNotify` | pass |
 | Customer alert is separate | `TestStrollxInboxOnlySkipsProximityPush/Customer_alert_is_separate` | pass |
@@ -13,6 +17,26 @@ Updated: 2026-10-22T16:49:41Z
 
 <!-- cases
 [
+  {
+    "title": "Customer alert uses Proximity tokens",
+    "test": "TestPushTargetApp/Customer_alert_uses_Proximity_tokens",
+    "result": "pass"
+  },
+  {
+    "title": "Staff alert uses StrollX tokens",
+    "test": "TestPushTargetApp/Staff_alert_uses_StrollX_tokens",
+    "result": "pass"
+  },
+  {
+    "title": "StrollX app flag",
+    "test": "TestPushTargetApp/StrollX_app_flag",
+    "result": "pass"
+  },
+  {
+    "title": "WhatsApp template stays Proximity",
+    "test": "TestPushTargetApp/WhatsApp_template_stays_Proximity",
+    "result": "pass"
+  },
   {
     "title": "Class-over send uses the login role",
     "test": "TestStaffBulkStatusUsesLoginRole",
