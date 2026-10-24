@@ -148,9 +148,12 @@ services:
       META_PHONE_NUMBER_ID: ${META_PHONE_NUMBER_ID:-}
       META_API_VERSION: ${META_API_VERSION:-v21.0}
       FCM_SERVER_KEY: ${FCM_SERVER_KEY:-}
+      FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-/secrets/fcm_service_account.json}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-myproject7708-c90d5}
       CORS_ORIGINS: ${CORS_ORIGINS:-https://cloud.facinect.com}
     volumes:
       - ./keys:/keys:ro
+      - ./secrets/fcm_service_account.json:/secrets/fcm_service_account.json:ro
     depends_on:
       postgres:
         condition: service_healthy

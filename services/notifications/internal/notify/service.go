@@ -458,13 +458,52 @@ func (s *Service) Inbox(ctx context.Context, userID *int64, email string, limit 
 		_ = email
 		return []LogItem{}, nil
 	}
+	s.ensureLogDeleted(ctx)
 	q := `
 SELECT id, job_id, facility_id, user_id, channel, COALESCE(template_key,''), COALESCE(title,''), COALESCE(body,''),
        COALESCE(to_whatsapp,''), status, meta_json, created_at, seen_at
 FROM notification_log
-WHERE user_id=$1
+WHERE user_id=$1 AND deleted_at IS NULL
 ORDER BY created_at DESC LIMIT $2`
 	return s.scanLog(ctx, q, *userID, limit)
+}
+
+// DeleteInbox hides one or all inbox rows for the logged-in StrollX user.
+func (s *Service) DeleteInbox(ctx context.Context, userID int64, ids []int64, deleteAll bool) (int, error) {
+	if userID <= 0 {
+		return 0, fmt.Errorf("unauthorized")
+	}
+	s.ensureLogDeleted(ctx)
+	if deleteAll {
+		res, err := s.DB.ExecContext(ctx, `
+UPDATE notification_log SET deleted_at=NOW()
+WHERE user_id=$1 AND deleted_at IS NULL`, userID)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		return int(n), nil
+	}
+	n := 0
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		res, err := s.DB.ExecContext(ctx, `
+UPDATE notification_log SET deleted_at=NOW()
+WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL`, userID, id)
+		if err != nil {
+			return n, err
+		}
+		affected, _ := res.RowsAffected()
+		n += int(affected)
+	}
+	return n, nil
+}
+
+func (s *Service) ensureLogDeleted(ctx context.Context) {
+	_, _ = s.DB.ExecContext(ctx, `
+ALTER TABLE notification_log ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL`)
 }
 
 func (s *Service) scanLog(ctx context.Context, q string, args ...interface{}) ([]LogItem, error) {
