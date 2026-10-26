@@ -8,12 +8,12 @@ import (
 func TestResolveFacilityDynamicTemplate(t *testing.T) {
 	for _, name := range []string{"news_v3", "student_broadcast", "member_broadcast", "news"} {
 		got, lang := resolveWhatsAppTemplate(name, "en")
-		if got != facilityDynamicTemplate || lang != "en_US" {
+		if got != facilityDynamicTemplate || lang != "en" {
 			t.Fatalf("%s -> %s %s", name, got, lang)
 		}
 	}
 	got, lang := resolveWhatsAppTemplate(facilityDynamicTemplate, "en_US")
-	if got != facilityDynamicTemplate || lang != "en_US" {
+	if got != facilityDynamicTemplate || lang != "en" {
 		t.Fatalf("passthrough -> %s %s", got, lang)
 	}
 }

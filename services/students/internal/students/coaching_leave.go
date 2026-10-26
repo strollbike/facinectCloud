@@ -533,7 +533,7 @@ WHERE e.facility_id=$1
 				"title":       title,
 				"body":        waNote,
 				"message":     waNote,
-				"language":    "en_US",
+				"language":    "en",
 				"body_params": []string{facilityName, r.name, waNote},
 				"type":        map[bool]string{true: "coaching_leave_cancelled", false: "coaching_leave"}[cancelled],
 				// Tray only. A high-priority heads-up on this same phone
