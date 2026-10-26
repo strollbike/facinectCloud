@@ -230,8 +230,9 @@ func resolveWhatsAppTemplate(name, lang string) (string, string) {
 		return name, lang
 	case "payment_reminder", "payment_notice":
 		return "payment_notice_v3", "en_US"
-	case "member_broadcast", "student_broadcast", "booking_message", "facility_broadcast", "news", "news_v3":
-		return facilityDynamicTemplate, "en_US"
+	case "member_broadcast", "student_broadcast", "booking_message", "facility_broadcast", "news", "news_v3", facilityDynamicTemplate:
+		// Meta approved this template as English (en), not English (US).
+		return facilityDynamicTemplate, "en"
 	case "hello_world1":
 		if lang == "" || lang == "en" {
 			return name, "en"

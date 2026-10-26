@@ -605,7 +605,7 @@ WHERE ms.facility_id=$1 AND ms.status='active'`, facilityID)
 			who = "Member"
 		}
 		if err := s.notifyChannel(ctx, facilityID, phone, "facinect_facility_dynamic_msg", "whatsapp", map[string]interface{}{
-			"language":    "en_US",
+			"language":    "en",
 			"body_params": []string{fname, who, msg},
 			"title":       title,
 			"body":        msg,
