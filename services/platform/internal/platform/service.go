@@ -21,6 +21,7 @@ import (
 var (
 	ErrDuplicateOnboarding = errors.New("duplicate_onboarding")
 	nonDigitRE             = regexp.MustCompile(`\D+`)
+	mapsURLRe              = regexp.MustCompile(`(?i)(maps\.app\.goo\.gl|google\.[^/]+/maps|goo\.gl/maps|maps\.google\.)`)
 )
 
 type Service struct {
@@ -224,6 +225,14 @@ func normalizeMapsURL(v string) string {
 	return u.Host + path
 }
 
+func validMapsURL(v string) bool {
+	v = strings.TrimSpace(v)
+	if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+		return false
+	}
+	return mapsURLRe.MatchString(v)
+}
+
 func payloadString(m map[string]interface{}, keys ...string) string {
 	for _, k := range keys {
 		if raw, ok := m[k]; ok && raw != nil {
@@ -271,24 +280,27 @@ ORDER BY id DESC LIMIT 1`, kind, wa).Scan(&id)
 			return 0, "", err
 		}
 	}
-	if kind == "facility" && mapsURL != "" {
+	// Same place cannot register again as a facility or an organisation
+	// with a different Gmail. Match the Google Maps link across both kinds.
+	if (kind == "facility" || kind == "tournament") && mapsURL != "" {
 		var id int64
-		// Normalize stored URL the same way as normalizeMapsURL (host+path, no query).
 		err := s.DB.QueryRowContext(ctx, `
 SELECT id FROM platform_onboarding_requests
-WHERE kind=$1 AND `+active+`
+WHERE kind IN ('facility', 'tournament') AND `+active+`
   AND lower(trim(trailing '/' from split_part(
         replace(replace(
           COALESCE(
             NULLIF(trim(payload->>'googleMapUrl'), ''),
             NULLIF(trim(payload->>'google_map_url'), ''),
+            NULLIF(trim(payload->>'map_url'), ''),
+            NULLIF(trim(payload->>'mapUrl'), ''),
             NULLIF(trim(payload->>'locationUrl'), ''),
             ''
           ),
           'https://', ''), 'http://', ''),
         '?', 1
-      ))) = $2
-ORDER BY id DESC LIMIT 1`, kind, mapsURL).Scan(&id)
+      ))) = $1
+ORDER BY id DESC LIMIT 1`, mapsURL).Scan(&id)
 		if err == nil {
 			return id, "googleMapUrl", nil
 		}
@@ -325,17 +337,25 @@ func (s *Service) SubmitOnboarding(ctx context.Context, kind string, in SubmitIn
 		wa = normalizeWhatsApp(payloadString(payloadMap, "whatsappNumber", "phone"))
 	}
 	mapsURL := ""
-	if kind == "facility" {
-		mapsURL = normalizeMapsURL(payloadString(payloadMap, "googleMapUrl", "google_map_url", "locationUrl"))
+	if kind == "facility" || kind == "tournament" {
+		rawMaps := payloadString(payloadMap, "googleMapUrl", "google_map_url", "map_url", "mapUrl", "locationUrl")
+		if !validMapsURL(rawMaps) {
+			return nil, fmt.Errorf("A valid Google Maps location URL is required")
+		}
+		mapsURL = normalizeMapsURL(rawMaps)
 	}
 
 	if dupID, field, err := s.findDuplicateOnboarding(ctx, kind, email, wa, mapsURL); err != nil {
 		return nil, err
 	} else if dupID > 0 {
+		message := "Already submitted — wait for approval."
+		if field == "googleMapUrl" {
+			message = "This Google Maps location is already registered. Use the original account."
+		}
 		return map[string]interface{}{
 			"success": false,
 			"error":   ErrDuplicateOnboarding.Error(),
-			"message": "Already submitted — wait for approval.",
+			"message": message,
 			"data": map[string]interface{}{
 				"id":          dupID,
 				"kind":        kind,

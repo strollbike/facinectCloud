@@ -128,6 +128,34 @@ func (w *WhatsAppClient) Send(ctx context.Context, req SendRequest, creds WhatsA
 	return "whatsapp:ok", nil
 }
 
+// DataForRecipient copies the shared bulk payload and puts this person's name in {{2}}.
+func DataForRecipient(data map[string]interface{}, name string) map[string]interface{} {
+	out := map[string]interface{}{}
+	for k, v := range data {
+		out[k] = v
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return out
+	}
+	switch list := out["body_params"].(type) {
+	case []interface{}:
+		cp := make([]interface{}, len(list))
+		copy(cp, list)
+		if len(cp) >= 2 {
+			cp[1] = name
+		}
+		out["body_params"] = cp
+	case []string:
+		cp := append([]string{}, list...)
+		if len(cp) >= 2 {
+			cp[1] = name
+		}
+		out["body_params"] = cp
+	}
+	return out
+}
+
 func dataString(data map[string]interface{}, keys ...string) string {
 	if data == nil {
 		return ""
@@ -143,9 +171,13 @@ func dataString(data map[string]interface{}, keys ...string) string {
 	return ""
 }
 
+// facilityDynamicTemplate is the approved dashboard message:
+// Welcome to {{1}}! Hello {{2}}, {{3}} Thank you for choosing us!
+// {{1}} facility or academy, {{2}} that person's name, {{3}} the typed note.
+const facilityDynamicTemplate = "facinect_facility_dynamic_msg"
+
 // resolveWhatsAppTemplate maps logical template keys to Meta-approved names/languages.
 // payment_reminder_dns is the Facinect PHP billing template (language en, 3 body params).
-// member_broadcast / student_broadcast are not on this WABA; news_v3 (en_US) is.
 func resolveWhatsAppTemplate(name, lang string) (string, string) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "payment_reminder_dns":
@@ -155,8 +187,8 @@ func resolveWhatsAppTemplate(name, lang string) (string, string) {
 		return name, lang
 	case "payment_reminder", "payment_notice":
 		return "payment_notice_v3", "en_US"
-	case "member_broadcast", "student_broadcast", "booking_message", "facility_broadcast", "news":
-		return "news_v3", "en_US"
+	case "member_broadcast", "student_broadcast", "booking_message", "facility_broadcast", "news", "news_v3":
+		return facilityDynamicTemplate, "en_US"
 	case "hello_world1":
 		if lang == "" || lang == "en" {
 			return name, "en"

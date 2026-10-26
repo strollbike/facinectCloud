@@ -516,7 +516,7 @@ WHERE e.facility_id=$1
 	title := "Coaching leave"
 	when := formatLeaveDate(date)
 	batches := strings.Join(planNames, ", ")
-	// news_v3 is {{1}} facility, {{2}} student, {{3}} message — the date must be inside {{3}}.
+	// facinect_facility_dynamic_msg: {{1}} facility, {{2}} student, {{3}} message.
 	waNote := fmt.Sprintf("No coaching on %s (%s). %s", when, batches, note)
 	if cancelled {
 		title = "Coaching is on"
@@ -527,7 +527,7 @@ WHERE e.facility_id=$1
 		payload := map[string]interface{}{
 			"channel":     "both",
 			"facility_id": facilityID,
-			"template":    "news_v3",
+			"template":    "facinect_facility_dynamic_msg",
 			"to":          map[string]string{"whatsapp": r.phone},
 			"data": map[string]interface{}{
 				"title":       title,

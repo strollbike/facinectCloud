@@ -31,6 +31,7 @@ type SendTo struct {
 	WhatsApp     string   `json:"whatsapp"`
 	UserID       *int64   `json:"user_id"`
 	DeviceTokens []string `json:"device_tokens"`
+	Name         string   `json:"name,omitempty"`
 }
 
 type Job struct {
@@ -220,29 +221,37 @@ func (s *Service) process(ctx context.Context, job *Job, req SendRequest) (*Job,
 			}
 			if pushErr != nil {
 				waSkipped := strings.Contains(providerRef, "wa_skip:")
-				// Push-only, or both with no WhatsApp attempt → push must succeed.
-				if job.Channel == "push" || waSkipped {
-					lastErr = pushErr
-					status = "failed"
-				} else if lastErr == nil && status == "sent" {
-					// WhatsApp already delivered — soft-skip missing FCM token.
+				waDelivered := lastErr == nil && (status == "sent" || status == "dry_run")
+				if job.Channel == "both" && waDelivered {
+					// WhatsApp already went out. A push failure must not cancel it.
 					if providerRef != "" {
 						providerRef = providerRef + ",push_skip:" + pushErr.Error()
 					} else {
 						providerRef = "push_skip:" + pushErr.Error()
 					}
-				} else if lastErr == nil {
+				} else if job.Channel == "push" || waSkipped || job.Channel != "both" {
+					lastErr = pushErr
+					status = "failed"
+				} else if lastErr != nil {
+					// Both engines failed. Keep the first error and note push.
+					lastErr = fmt.Errorf("%s; push:%s", lastErr.Error(), pushErr.Error())
+					status = "failed"
+				} else {
 					lastErr = pushErr
 					status = "failed"
 				}
 			} else if job.Channel == "both" && status == "failed" {
-				// WhatsApp failed but push delivered — treat as sent with WA error retained.
+				// Push delivered after WhatsApp failed. Do not stop the notification.
+				waNote := "wa_failed"
+				if lastErr != nil && lastErr.Error() != "" {
+					waNote = "wa_failed:" + lastErr.Error()
+				}
 				status = "sent"
 				lastErr = nil
 				if providerRef != "" {
-					providerRef = providerRef + ",wa_failed"
+					providerRef = providerRef + "," + waNote
 				} else {
-					providerRef = "wa_failed"
+					providerRef = waNote
 				}
 			}
 		}

@@ -210,27 +210,43 @@ func (s *Server) handleSendBulk(w http.ResponseWriter, r *http.Request) {
 			data["quick_reply_payload"] = "I_AM_INTERESTED"
 		}
 	}
+	ch := strings.ToLower(strings.TrimSpace(body.Channel))
+	if ch == "" {
+		ch = "both"
+	}
 	jobs := make([]*notify.Job, 0, len(body.Recipients))
+	delivered, failed := 0, 0
+	failures := make([]string, 0)
 	for _, to := range body.Recipients {
 		job, err := s.Notify.Send(r.Context(), notify.SendRequest{
-			Channel:     body.Channel,
+			Channel:     ch,
 			FacilityID:  body.FacilityID,
 			TemplateKey: tmpl,
 			To:          to,
-			Data:        data,
+			Data:        notify.DataForRecipient(data, to.Name),
 		})
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"error": err.Error(),
-				"jobs":  jobs,
-			})
-			return
+			// One recipient or one engine must not cancel the rest.
+			failed++
+			failures = append(failures, err.Error())
+			continue
 		}
 		jobs = append(jobs, job)
+		if job != nil && strings.EqualFold(job.Status, "failed") {
+			failed++
+			if job.ErrorText != "" {
+				failures = append(failures, job.ErrorText)
+			}
+			continue
+		}
+		delivered++
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"count": len(jobs),
-		"jobs":  jobs,
+		"count":   delivered,
+		"failed":  failed,
+		"jobs":    jobs,
+		"errors":  failures,
+		"channel": ch,
 	})
 }
 
