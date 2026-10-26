@@ -156,6 +156,49 @@ func DataForRecipient(data map[string]interface{}, name string) map[string]inter
 	return out
 }
 
+// FacilityDynamicMessage is the approved facinect_facility_dynamic_msg wording.
+// {{1}} facility, {{2}} person, {{3}} the typed note.
+func FacilityDynamicMessage(facility, person, note string) string {
+	facility = strings.TrimSpace(facility)
+	person = strings.TrimSpace(person)
+	note = strings.TrimSpace(note)
+	if facility == "" {
+		facility = "Facinect"
+	}
+	if person == "" {
+		person = "there"
+	}
+	return fmt.Sprintf("Welcome to %s!\n\nHello %s,\n\n%s\n\nThank you for choosing us!", facility, person, note)
+}
+
+func bodyParamStrings(data map[string]interface{}) []string {
+	if data == nil {
+		return nil
+	}
+	raw, ok := data["body_params"]
+	if !ok || raw == nil {
+		return nil
+	}
+	var out []string
+	switch list := raw.(type) {
+	case []interface{}:
+		for _, item := range list {
+			s := strings.TrimSpace(fmt.Sprint(item))
+			if s != "" && s != "<nil>" {
+				out = append(out, s)
+			}
+		}
+	case []string:
+		for _, s := range list {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
 func dataString(data map[string]interface{}, keys ...string) string {
 	if data == nil {
 		return ""
