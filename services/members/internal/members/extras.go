@@ -514,10 +514,14 @@ type BulkNotifyResult struct {
 func (s *Service) BulkNotify(ctx context.Context, facilityID int64, in BulkNotifyInput) (*BulkNotifyResult, error) {
 	phones := []string{}
 	seenPhone := map[string]struct{}{}
-	addPhone := func(raw string) {
+	nameByPhone := map[string]string{}
+	addPhone := func(raw, name string) {
 		p := digitsOnlyPhone(raw)
 		if p == "" {
 			return
+		}
+		if strings.TrimSpace(name) != "" {
+			nameByPhone[p] = strings.TrimSpace(name)
 		}
 		if _, ok := seenPhone[p]; ok {
 			return
@@ -526,16 +530,28 @@ func (s *Service) BulkNotify(ctx context.Context, facilityID int64, in BulkNotif
 		phones = append(phones, p)
 	}
 	for _, r := range in.Recipients {
+		phone := ""
 		for _, k := range []string{"whatsapp", "whatsappNo", "phone", "contact_phone"} {
 			if v, ok := r[k]; ok {
-				addPhone(fmt.Sprint(v))
+				phone = fmt.Sprint(v)
 				break
 			}
 		}
+		who := ""
+		for _, k := range []string{"name", "full_name", "fullName", "memberName", "studentName"} {
+			if v, ok := r[k]; ok {
+				who = strings.TrimSpace(fmt.Sprint(v))
+				if who != "" && who != "<nil>" {
+					break
+				}
+				who = ""
+			}
+		}
+		addPhone(phone, who)
 	}
 	if len(phones) == 0 {
 		rows, err := s.DB.QueryContext(ctx, `
-SELECT COALESCE(NULLIF(m.whatsapp,''), NULLIF(m.contact_phone,''))
+SELECT COALESCE(NULLIF(m.whatsapp,''), NULLIF(m.contact_phone,'')), COALESCE(m.full_name,'')
 FROM memberships ms
 JOIN members m ON m.id = ms.member_id
 WHERE ms.facility_id=$1 AND ms.status='active'`, facilityID)
@@ -544,10 +560,10 @@ WHERE ms.facility_id=$1 AND ms.status='active'`, facilityID)
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var wa sql.NullString
-			_ = rows.Scan(&wa)
+			var wa, full sql.NullString
+			_ = rows.Scan(&wa, &full)
 			if wa.Valid {
-				addPhone(wa.String)
+				addPhone(wa.String, full.String)
 			}
 		}
 	}
@@ -582,11 +598,15 @@ WHERE ms.facility_id=$1 AND ms.status='active'`, facilityID)
 		} else {
 			out.NoAppUser++
 		}
-		// news_v3 (en_US): {{1}} facility, {{2}} name, {{3}} message
+		// facinect_facility_dynamic_msg: {{1}} facility, {{2}} this member, {{3}} message.
 		// Push already sent above — WhatsApp-only here to avoid double FCM.
-		if err := s.notifyChannel(ctx, facilityID, phone, "news_v3", "whatsapp", map[string]interface{}{
+		who := nameByPhone[phone]
+		if who == "" {
+			who = "Member"
+		}
+		if err := s.notifyChannel(ctx, facilityID, phone, "facinect_facility_dynamic_msg", "whatsapp", map[string]interface{}{
 			"language":    "en_US",
-			"body_params": []string{fname, "Member", msg},
+			"body_params": []string{fname, who, msg},
 			"title":       title,
 			"body":        msg,
 		}); err == nil {
