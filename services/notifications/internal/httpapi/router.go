@@ -24,7 +24,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/notifications/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/notifications/openapi.json", s.handleOpenAPI)
-	mux.HandleFunc("POST /v1/notifications/send", s.withAuth(s.handleSend))
+	mux.HandleFunc("POST /v1/notifications/send", s.withSendBulkAuth(s.handleSend))
 	mux.HandleFunc("POST /v1/notifications/send-bulk", s.withSendBulkAuth(s.handleSendBulk))
 	mux.HandleFunc("POST /v1/notifications/service-broadcast", s.withAuth(s.handleServiceBroadcast))
 	mux.HandleFunc("GET /v1/notifications/service-broadcasts", s.withAuth(s.handleListServiceBroadcasts))
