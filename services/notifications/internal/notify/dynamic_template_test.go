@@ -1,6 +1,9 @@
 package notify
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestResolveFacilityDynamicTemplate(t *testing.T) {
 	for _, name := range []string{"news_v3", "student_broadcast", "member_broadcast", "news"} {
@@ -12,6 +15,15 @@ func TestResolveFacilityDynamicTemplate(t *testing.T) {
 	got, lang := resolveWhatsAppTemplate(facilityDynamicTemplate, "en_US")
 	if got != facilityDynamicTemplate || lang != "en_US" {
 		t.Fatalf("passthrough -> %s %s", got, lang)
+	}
+}
+
+func TestFacilityDynamicMessageIncludesAllThree(t *testing.T) {
+	got := FacilityDynamicMessage("Bharathi Academy", "Raja", "Class is at 6")
+	for _, part := range []string{"Welcome to Bharathi Academy!", "Hello Raja,", "Class is at 6", "Thank you for choosing us!"} {
+		if !strings.Contains(got, part) {
+			t.Fatalf("missing %q in %s", part, got)
+		}
 	}
 }
 

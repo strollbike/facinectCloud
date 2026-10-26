@@ -46,13 +46,20 @@ func (p *PushClient) Send(ctx context.Context, req SendRequest) (string, error) 
 		body = "You have a new notification"
 	}
 	stringData := map[string]string{}
-	if req.Data != nil {
+	resolvedTmpl, _ := resolveWhatsAppTemplate(req.TemplateKey, "")
+	if params := bodyParamStrings(req.Data); len(params) >= 3 &&
+		resolvedTmpl == facilityDynamicTemplate {
+		title = params[0]
+		body = FacilityDynamicMessage(params[0], params[1], params[2])
+	} else if req.Data != nil {
 		if t, ok := req.Data["title"].(string); ok && t != "" {
 			title = t
 		}
 		if b, ok := req.Data["body"].(string); ok && b != "" {
 			body = b
 		}
+	}
+	if req.Data != nil {
 		for k, v := range req.Data {
 			if !fcmDataKeyAllowed(k) {
 				continue

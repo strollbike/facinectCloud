@@ -315,6 +315,11 @@ func normalizePushApp(app string) string {
 }
 
 func titleBodyFromData(req SendRequest) (string, string) {
+	resolvedTmpl, _ := resolveWhatsAppTemplate(req.TemplateKey, "")
+	if params := bodyParamStrings(req.Data); len(params) >= 3 &&
+		resolvedTmpl == facilityDynamicTemplate {
+		return params[0], FacilityDynamicMessage(params[0], params[1], params[2])
+	}
 	title := strings.TrimSpace(req.TemplateKey)
 	if title == "" {
 		title = "Facinect"
