@@ -3,6 +3,7 @@ package tournaments
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -333,6 +334,17 @@ func (s *Service) GenerateNextRound(ctx context.Context, tournamentID int64, in 
 	if len(curRound) == 0 {
 		return nil, fmt.Errorf("no_current_round")
 	}
+
+	// Stage D: pool stage (R1 with pool_no) → hybrid qualifiers, not match winners.
+	if maxRound == 1 && hasPoolStage(curRound) {
+		rules := SportRulesFromKnockout(in)
+		qualified, err := HybridQualifiers(curRound, rules)
+		if err != nil {
+			return nil, err
+		}
+		return s.insertKnockoutRound(ctx, tournamentID, cat, gen, maxRound+1, qualified, map[string]int64{})
+	}
+
 	for _, f := range curRound {
 		if !isCompletedFixtureStatus(f.Status) || strings.TrimSpace(f.Winner) == "" {
 			return nil, fmt.Errorf("round_incomplete")
@@ -383,20 +395,6 @@ func (s *Service) GenerateNextRound(ctx context.Context, tournamentID int64, in 
 	if len(qualified) < 2 {
 		return nil, fmt.Errorf("need_at_least_2_sides")
 	}
-	if len(qualified) == 2 && maxRound > 0 {
-		// May still need final
-	}
-
-	pairs := FirstRoundPairs(qualified) // later rounds always bye-pad
-	nextRoundNo := maxRound + 1
-	label := RoundLabel(len(pairs), nextRoundNo)
-	if len(pairs) == 1 {
-		label = "Final"
-	} else if len(pairs) == 2 {
-		label = "Semi-Final"
-	}
-
-	// Map source match ids for winners where possible.
 	winnerSource := map[string]int64{}
 	for _, f := range curRound {
 		w := strings.TrimSpace(f.Winner)
@@ -404,7 +402,21 @@ func (s *Service) GenerateNextRound(ctx context.Context, tournamentID int64, in 
 			winnerSource[w] = f.ID
 		}
 	}
+	return s.insertKnockoutRound(ctx, tournamentID, cat, gen, maxRound+1, qualified, winnerSource)
+}
 
+func (s *Service) insertKnockoutRound(ctx context.Context, tournamentID int64, cat, gen string, nextRoundNo int, qualified []string, winnerSource map[string]int64) ([]Fixture, error) {
+	if len(qualified) < 2 {
+		return nil, fmt.Errorf("need_at_least_2_sides")
+	}
+	pairs := FirstRoundPairs(qualified)
+	label := RoundLabel(len(pairs), nextRoundNo)
+	if len(pairs) == 1 {
+		label = "Final"
+	} else if len(pairs) == 2 {
+		label = "Semi-Final"
+	}
+	poolZero := 0
 	matchNo := 0
 	for _, p := range pairs {
 		matchNo++
@@ -437,12 +449,12 @@ func (s *Service) GenerateNextRound(ctx context.Context, tournamentID int64, in 
 		err := s.DB.QueryRowContext(ctx, `
 INSERT INTO tournament_fixtures
   (tournament_id, category, gender, round_no, match_no, team1, team2,
-   score1, score2, winner, status, round_name, is_bye,
+   score1, score2, winner, status, pool_no, round_name, is_bye,
    source_match1_id, source_match2_id, locked)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12,$13,$14,$15,TRUE)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12,$13,$14,$15,$16,TRUE)
 RETURNING id`,
 			tournamentID, cat, gen, nextRoundNo, matchNo, p.Player1, p.Player2,
-			ptrOrNil(s1), ptrOrNil(s2), winner, status, label, p.IsBye,
+			ptrOrNil(s1), ptrOrNil(s2), winner, status, poolZero, label, p.IsBye,
 			ptrI64OrNil(src1), ptrI64OrNil(src2),
 		).Scan(&id)
 		if err != nil {
@@ -462,6 +474,42 @@ RETURNING id`,
 		}
 	}
 	return s.listFixturesFiltered(ctx, tournamentID, cat, gen)
+}
+
+// BuildStandings returns ranked pool tables (PHP TournamentEngine::buildStandings).
+func (s *Service) BuildStandings(ctx context.Context, tournamentID int64, category, gender string) (map[string][]StandingRow, error) {
+	list, err := s.listFixturesFiltered(ctx, tournamentID, category, gender)
+	if err != nil {
+		return nil, err
+	}
+	rules := DefaultSportRules()
+	byPool := BuildStandingsByPool(list, rules)
+	out := map[string][]StandingRow{}
+	keys := make([]int, 0, len(byPool))
+	for k := range byPool {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	for _, k := range keys {
+		rowsMap := byPool[k]
+		rows := make([]*StandingRow, 0, len(rowsMap))
+		for _, r := range rowsMap {
+			rows = append(rows, r)
+		}
+		pm := []Fixture{}
+		for _, m := range list {
+			if m.PoolNo != nil && *m.PoolNo == k {
+				pm = append(pm, m)
+			}
+		}
+		ranked := RankStandings(rows, rules.RankingRules, pm)
+		arr := make([]StandingRow, 0, len(ranked))
+		for _, r := range ranked {
+			arr = append(arr, *r)
+		}
+		out[fmt.Sprintf("%d", k)] = arr
+	}
+	return out, nil
 }
 
 func ptrOrNil(p *int) interface{} {
