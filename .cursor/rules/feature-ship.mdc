@@ -1,5 +1,5 @@
 ---
-description: Feature-wise branch + PR shipping for all Facinect services
+description: Feature-wise branch + PR shipping for all Facinect services (test + report + approval before push)
 alwaysApply: true
 ---
 
@@ -9,5 +9,10 @@ When the user asks to ship a feature, create a PR, push service changes, or do f
 
 1. Follow project skill `.cursor/skills/feature-pr/SKILL.md`.
 2. Applies to **all** services/apps (`services/*`, `apps/*`, gateway, docs, compose) — not one service only.
-3. Branch `feat/<service>-<slug>`; create if missing; push; `gh pr create`; return PR URL.
-4. Never commit `.env` or secrets; never force-push main.
+3. Branch `feat/<service>-<slug>`; create if missing.
+4. **Before any `git push` or `gh pr create`:**
+   - Run relevant tests for the changed services.
+   - Write a short report document (what changed, test results, risks, VPS steps).
+   - **Stop and wait for explicit user approval.**
+   - Push / open PR **only after** the user says approve / ok / push.
+5. Never commit `.env` or secrets; never force-push main.

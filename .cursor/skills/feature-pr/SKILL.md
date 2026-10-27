@@ -4,7 +4,8 @@ description: >-
   Feature-wise git branch, push, and GitHub PR for any Facinect microservice or
   app (identity, notifications, web, gateway, and future services). Use when the
   user asks to ship a feature, create a PR, push service changes, open a pull
-  request, feature branch, or feature-wise code push.
+  request, feature branch, or feature-wise code push. Always test, write a
+  report, and wait for user approval before any push.
 ---
 
 # Feature-wise branch + PR (all services)
@@ -25,6 +26,24 @@ Never commit secrets: `.env`, `.env.prod`, keys, tokens, credential dumps.
 
 `ship feature`, `feature PR`, `push this service`, `create PR`, `feature branch`, `feature-wise push`.
 
+## Hard gate (mandatory)
+
+**Do not `git push` and do not `gh pr create` until the user explicitly approves.**
+
+Order every ship:
+
+1. Implement / stage / commit locally on `feat/<service>-<slug>` (commit only if user asked to ship/PR/commit).
+2. **Test** the changed services (e.g. `go test` in Docker for Go services; Flutter analyze for StrollX when app changed).
+3. **Report document** in the chat (and optionally `docs/` only if the user asked for a file). Include:
+   - What changed (paths + why)
+   - Test commands + pass/fail
+   - Risks / Meta or env notes
+   - Suggested VPS rebuild commands (do not run unless asked)
+4. **Wait** for approval words such as: `approve`, `approved`, `ok push`, `push`, `go ahead`.
+5. Only then: push + `gh pr create` + return PR URL.
+
+If the user has not approved yet, stop after the report. Do not push “to save time.”
+
 ## Workflow
 
 1. **Inspect** (parallel): `git status`, `git diff` (staged + unstaged), `git log -5 --oneline`, `git branch -vv`, remote tracking.
@@ -40,9 +59,10 @@ Never commit secrets: `.env`, `.env.prod`, keys, tokens, credential dumps.
    - If exists remotely → checkout / track it; apply current work onto it
    - Do not force-push `main`/`master`
 4. **Stage** only files for this feature (exclude secrets and unrelated junk).
-5. **Commit** when user asked to ship/PR (that implies commit). Message: why-focused, 1–2 sentences. Use HEREDOC. Follow repo commit style from `git log`.
-6. **Push**: `git push -u origin HEAD` (needs network/`all` permissions as required).
-7. **PR** with `gh pr create`:
+5. **Commit** when user asked to ship/PR (that implies commit). Message: why-focused, 1–2 sentences. Use HEREDOC / `git commit -F -` (no unsupported `--trailer` on older git). Follow repo commit style from `git log`.
+6. **Test + report + wait for approval** (see Hard gate).
+7. **Push** (only after approval): `git push -u origin HEAD` (needs network as required). Prefer `HEAD:feat/<service>-<slug>` so a mis-tracked branch cannot update `main`.
+8. **PR** with `gh pr create` (use `--repo strollbike/facinectCloud` if remote still points at the old org):
    - Title: `<service>: <short why>`
    - Body HEREDOC:
 
@@ -54,7 +74,7 @@ Never commit secrets: `.env`, `.env.prod`, keys, tokens, credential dumps.
 - [ ] …
 ```
 
-8. **Reply** with the PR URL. Stop.
+9. **Reply** with the PR URL. Stop.
 
 ## Multi-service one feature
 
