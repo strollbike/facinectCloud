@@ -18,6 +18,7 @@ After Identity login, these app services use **Identity JWT** + `FACINECT_GATEWA
 | Tournaments Phase-1 | `/v1/tournaments/...` list/create/update/status |
 | Tournaments Phase-2 | entries, fixtures, score, score-live, template, publish |
 | Tournaments Stage E/F | courts-board, entry checkout/confirm-payment via paygateway |
+| Tournaments Stage G/H | public live-arena / score-live; ref login / unlock / validate-assignment |
 | Referee admin (JWT) | `/v1/tournaments/referees`, `.../referees/assign-court` |
 | Score live long-poll | `GET .../score-live?category=&after_id=&wait=` |
 | Booking management / View / ledger | `/v1/booking/...` |
