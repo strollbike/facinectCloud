@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -19,23 +18,35 @@ import (
 // --- Knockout / preview / walkover / reset ---
 
 type KnockoutInput struct {
-	Category string `json:"category"`
-	Gender   string `json:"gender"`
+	Category         string `json:"category"`
+	Gender           string `json:"gender"`
+	PairingMode      string `json:"pairingMode"`
+	BracketMethod    string `json:"bracketMethod"`
+	EliminatedPerPool *int  `json:"eliminatedPerPool"`
+	Force            bool   `json:"force"`
 }
 
 type PreviewInput struct {
-	Category      string `json:"category"`
-	Gender        string `json:"gender"`
-	SideCount     int    `json:"sideCount"`
-	BracketMethod string `json:"bracketMethod"`
+	Category         string `json:"category"`
+	Gender           string `json:"gender"`
+	SideCount        int    `json:"sideCount"`
+	BracketMethod    string `json:"bracketMethod"`
+	MatchType        string `json:"matchType"`
+	PoolDistribution string `json:"poolDistribution"`
+	MatchesPerPool   int    `json:"matchesPerPool"`
 }
 
 type PreviewResult struct {
-	ByeCount     int `json:"bye_count"`
-	Preliminary  int `json:"preliminary"`
-	SideCount    int `json:"side_count"`
-	Rounds       int `json:"rounds"`
-	BracketSize  int `json:"bracket_size"`
+	ByeCount             int      `json:"bye_count"`
+	Preliminary          int      `json:"preliminary"`
+	SideCount            int      `json:"side_count"`
+	Rounds               int      `json:"rounds"`
+	BracketSize          int      `json:"bracket_size"`
+	Method               string   `json:"method,omitempty"`
+	FirstRoundLabel      string   `json:"first_round_label,omitempty"`
+	TotalPlayableMatches int      `json:"total_playable_matches,omitempty"`
+	SitOutCount          int      `json:"sit_out_count,omitempty"`
+	RoundNames           []string `json:"round_names,omitempty"`
 }
 
 type WalkoverInput struct {
@@ -45,51 +56,8 @@ type WalkoverInput struct {
 type ResetFixturesInput struct {
 	Category string `json:"category"`
 	Gender   string `json:"gender"`
-}
-
-func nextPow2(n int) int {
-	if n <= 1 {
-		return 1
-	}
-	p := 1
-	for p < n {
-		p <<= 1
-	}
-	return p
-}
-
-func estimateBracket(sideCount int) PreviewResult {
-	if sideCount < 0 {
-		sideCount = 0
-	}
-	if sideCount == 0 {
-		return PreviewResult{}
-	}
-	bracket := nextPow2(sideCount)
-	byes := bracket - sideCount
-	prelim := 0
-	if byes == 0 && sideCount > 1 {
-		// perfect power of 2 — no prelim/bye needed beyond first round
-		prelim = 0
-	} else if byes > 0 {
-		// sides that play in round of bracket: sideCount - byes play first,
-		// equivalently preliminary matches = (sideCount - bracket/2) when not power-of-2
-		half := bracket / 2
-		if sideCount > half {
-			prelim = sideCount - half
-		}
-	}
-	rounds := 0
-	if bracket > 1 {
-		rounds = int(math.Log2(float64(bracket)))
-	}
-	return PreviewResult{
-		ByeCount:    byes,
-		Preliminary: prelim,
-		SideCount:   sideCount,
-		Rounds:      rounds,
-		BracketSize: bracket,
-	}
+	Force    bool   `json:"force"`
+	ForceReset bool `json:"forceReset"`
 }
 
 func (s *Service) FixturePreview(ctx context.Context, tournamentID int64, in PreviewInput) (*PreviewResult, error) {
@@ -101,8 +69,26 @@ func (s *Service) FixturePreview(ctx context.Context, tournamentID int64, in Pre
 		}
 		sideCount = len(entries)
 	}
-	r := estimateBracket(sideCount)
-	return &r, nil
+	if sideCount < 2 {
+		return &PreviewResult{SideCount: sideCount}, nil
+	}
+	plan, err := PlanBracket(sideCount, in.BracketMethod)
+	if err != nil {
+		return nil, err
+	}
+	rounds := len(plan.Rounds)
+	return &PreviewResult{
+		ByeCount:             plan.ByeCount,
+		Preliminary:          plan.PrelimMatches,
+		SideCount:            sideCount,
+		Rounds:               rounds,
+		BracketSize:          plan.BracketSize,
+		Method:               plan.Method,
+		FirstRoundLabel:      plan.FirstRoundLabel,
+		TotalPlayableMatches: plan.TotalPlayableMatches,
+		SitOutCount:          plan.SitOutCount,
+		RoundNames:           plan.Rounds,
+	}, nil
 }
 
 func (s *Service) listEntriesFiltered(ctx context.Context, tournamentID int64, category, gender string) ([]Entry, error) {
@@ -126,87 +112,6 @@ func (s *Service) listEntriesFiltered(ctx context.Context, tournamentID int64, c
 		out = append(out, e)
 	}
 	return out, nil
-}
-
-func (s *Service) GenerateKnockout(ctx context.Context, tournamentID int64, in KnockoutInput) ([]Fixture, error) {
-	cat := strings.TrimSpace(in.Category)
-	gen := strings.TrimSpace(in.Gender)
-
-	// Prefer winners from existing completed fixtures in this category; else entries.
-	sides := []string{}
-	existing, err := s.ListFixtures(ctx, tournamentID)
-	if err != nil {
-		return nil, err
-	}
-	winners := []string{}
-	for _, f := range existing {
-		if cat != "" && !strings.EqualFold(f.Category, cat) {
-			continue
-		}
-		if gen != "" && !strings.EqualFold(f.Gender, gen) {
-			continue
-		}
-		if strings.EqualFold(f.Status, "completed") && strings.TrimSpace(f.Winner) != "" {
-			winners = append(winners, f.Winner)
-		}
-	}
-	if len(winners) >= 2 {
-		sides = winners
-	} else {
-		entries, err := s.listEntriesFiltered(ctx, tournamentID, cat, gen)
-		if err != nil {
-			return nil, err
-		}
-		for _, e := range entries {
-			sides = append(sides, e.PlayerName)
-		}
-	}
-	if len(sides) < 2 {
-		return nil, fmt.Errorf("need_at_least_2_sides")
-	}
-
-	// Clear existing knockout-ish fixtures for this category (round >= 1 already used;
-	// we delete matching category fixtures then insert fresh KO round 1).
-	if err := s.ResetFixtures(ctx, tournamentID, ResetFixturesInput{Category: cat, Gender: gen}); err != nil {
-		return nil, err
-	}
-
-	est := estimateBracket(len(sides))
-	// Pad with BYE placeholders so pairing is even for first round playable matches.
-	padded := make([]string, 0, est.BracketSize)
-	padded = append(padded, sides...)
-	for len(padded) < est.BracketSize {
-		padded = append(padded, "BYE")
-	}
-
-	matchNo := 0
-	for i := 0; i < len(padded); i += 2 {
-		matchNo++
-		t1, t2 := padded[i], padded[i+1]
-		status := "scheduled"
-		var winner interface{}
-		var s1, s2 interface{}
-		if t1 == "BYE" && t2 != "BYE" {
-			status = "completed"
-			winner = t2
-			zero, one := 0, 1
-			s1, s2 = zero, one
-		} else if t2 == "BYE" && t1 != "BYE" {
-			status = "completed"
-			winner = t1
-			one, zero := 1, 0
-			s1, s2 = one, zero
-		}
-		_, err := s.DB.ExecContext(ctx, `
-INSERT INTO tournament_fixtures
-  (tournament_id, category, gender, round_no, match_no, team1, team2, score1, score2, winner, status)
-VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10)`,
-			tournamentID, cat, gen, matchNo, t1, t2, s1, s2, winner, status)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return s.listFixturesFiltered(ctx, tournamentID, cat, gen)
 }
 
 func (s *Service) listFixturesFiltered(ctx context.Context, tournamentID int64, category, gender string) ([]Fixture, error) {
@@ -258,12 +163,20 @@ func (s *Service) Walkover(ctx context.Context, fixtureID int64, winnerSide int)
 func (s *Service) ResetFixtures(ctx context.Context, tournamentID int64, in ResetFixturesInput) error {
 	cat := strings.TrimSpace(in.Category)
 	gen := strings.TrimSpace(in.Gender)
+	force := in.Force || in.ForceReset
+	existing, err := s.listFixturesFiltered(ctx, tournamentID, cat, gen)
+	if err != nil {
+		return err
+	}
+	if hasRealResults(existing) && !force {
+		return fmt.Errorf("bracket_locked")
+	}
 	if cat == "" && gen == "" {
 		_, err := s.DB.ExecContext(ctx, `
 DELETE FROM tournament_fixtures WHERE tournament_id=$1`, tournamentID)
 		return err
 	}
-	_, err := s.DB.ExecContext(ctx, `
+	_, err = s.DB.ExecContext(ctx, `
 DELETE FROM tournament_fixtures
 WHERE tournament_id=$1
   AND ($2='' OR LOWER(category)=LOWER($2))

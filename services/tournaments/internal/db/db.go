@@ -149,6 +149,22 @@ CREATE INDEX IF NOT EXISTS idx_tournament_ref_tokens_tid
 
 ALTER TABLE tournament_fixtures
   ADD COLUMN IF NOT EXISTS ref_id BIGINT NULL;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS pool_no INT NULL;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS round_name VARCHAR(64) NULL;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS is_bye BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS next_match_id BIGINT NULL;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS next_slot VARCHAR(8) NULL;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS source_match1_id BIGINT NULL;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS source_match2_id BIGINT NULL;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS locked BOOLEAN NOT NULL DEFAULT FALSE;
 
 ALTER TABLE tournaments
   ADD COLUMN IF NOT EXISTS group_url TEXT NULL;
