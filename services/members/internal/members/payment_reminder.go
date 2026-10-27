@@ -222,6 +222,7 @@ func (s *Service) SendPaymentReminders(ctx context.Context, facilityID int64, in
 		out.Message = "No recipients."
 		return out, nil
 	}
+	var lastWAErr string
 	// Same grouping as Facinect billing_history.php: one WhatsApp per phone.
 	batches := groupReminderLines(lines)
 	for _, batch := range batches {
@@ -262,11 +263,9 @@ func (s *Service) SendPaymentReminders(ctx context.Context, facilityID int64, in
 			out.NoAppUser++
 		}
 		// payment_reminder_dns (en), same as Facinect billing_history.php:
-		// {{1}} Student/Member: names, {{2}} amounts, {{3}} months, button ?p=encrypted.
-		btn := "?p=" + encryptURLParam(
-			fmt.Sprintf("contact_phone=%s&facilityId=%d", phoneKey(phone), facilityID),
-			s.Cfg.EncryptionKey,
-		)
+		// {{1}} Student/Member: names, {{2}} amounts, {{3}} months, button URL {{1}}.
+		// Meta rejects the send when the URL button has no parameter (#131008).
+		btn := paymentReminderButtonParam(phone, facilityID, s.Cfg.EncryptionKey)
 		if err := s.notifyChannel(ctx, facilityID, phone, "payment_reminder_dns", "whatsapp", map[string]interface{}{
 			"language":         "en",
 			"body_params":      []string{label, amounts, months},
@@ -277,6 +276,8 @@ func (s *Service) SendPaymentReminders(ctx context.Context, facilityID int64, in
 		}); err == nil {
 			out.WhatsApp++
 			got = true
+		} else if lastWAErr == "" {
+			lastWAErr = err.Error()
 		}
 		if got {
 			out.Queued++
@@ -287,7 +288,25 @@ func (s *Service) SendPaymentReminders(ctx context.Context, facilityID int64, in
 		"Queued %d · app %d · FCM %d · WhatsApp %d · no app user %d",
 		out.Queued, out.AppPush, out.FcmPush, out.WhatsApp, out.NoAppUser,
 	)
+	if out.WhatsApp == 0 && lastWAErr != "" {
+		out.Message = out.Message + " · WhatsApp failed: " + lastWAErr
+	}
 	return out, nil
+}
+
+// paymentReminderButtonParam is the Meta URL-button dynamic suffix.
+// Always non-empty so Graph never returns #131008 (button parameter missing).
+func paymentReminderButtonParam(phone string, facilityID int64, encKey string) string {
+	plain := fmt.Sprintf("contact_phone=%s&facilityId=%d", phoneKey(phone), facilityID)
+	if enc := encryptURLParam(plain, encKey); enc != "" {
+		return "?p=" + enc
+	}
+	// ENCRYPTION_KEY missing or encrypt failed — still send a usable pay suffix.
+	key := phoneKey(phone)
+	if key == "" {
+		key = "0"
+	}
+	return fmt.Sprintf("?p=f%d-%s", facilityID, key)
 }
 
 func (s *Service) writeBillingInbox(ctx context.Context, userID, facilityID int64, title, body, audience string) error {

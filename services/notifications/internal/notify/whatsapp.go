@@ -89,7 +89,12 @@ func (w *WhatsAppClient) Send(ctx context.Context, req SendRequest, creds WhatsA
 				"code": lang,
 			},
 		}
-		if comps := buildTemplateComponents(req); len(comps) > 0 {
+		comps := buildTemplateComponents(req)
+		// payment_reminder_dns has a URL button. Meta returns #131008 when it is omitted.
+		if strings.EqualFold(tmpl, "payment_reminder_dns") && !templateHasURLButton(comps) {
+			return "", fmt.Errorf("whatsapp_button_param_required")
+		}
+		if len(comps) > 0 {
 			template["components"] = comps
 		}
 		body = map[string]interface{}{
@@ -218,6 +223,32 @@ func dataString(data map[string]interface{}, keys ...string) string {
 // Welcome to {{1}}! Hello {{2}}, {{3}} Thank you for choosing us!
 // {{1}} facility or academy, {{2}} that person's name, {{3}} the typed note.
 const facilityDynamicTemplate = "facinect_facility_dynamic_msg"
+
+func templateHasURLButton(comps []interface{}) bool {
+	for _, c := range comps {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(fmt.Sprint(m["type"]), "button") {
+			continue
+		}
+		if !strings.EqualFold(fmt.Sprint(m["sub_type"]), "url") {
+			continue
+		}
+		switch params := m["parameters"].(type) {
+		case []map[string]string:
+			if len(params) > 0 && strings.TrimSpace(params[0]["text"]) != "" {
+				return true
+			}
+		case []interface{}:
+			if len(params) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // resolveWhatsAppTemplate maps logical template keys to Meta-approved names/languages.
 // payment_reminder_dns is the Facinect PHP billing template (language en, 3 body params).
