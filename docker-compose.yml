@@ -346,6 +346,8 @@ services:
       CORS_ORIGINS: "*"
       NOTIFICATIONS_BASE_URL: http://notifications:8080
       NOTIFICATIONS_SERVICE_KEY: ${NOTIFICATIONS_SERVICE_KEY:-}
+      PAYGATEWAY_URL: ${PAYGATEWAY_URL:-http://paygateway:8080}
+      PAYGATEWAY_SERVICE_KEY: ${PAYGATEWAY_SERVICE_KEY:-}
     volumes:
       - ./keys:/keys:ro
     depends_on:

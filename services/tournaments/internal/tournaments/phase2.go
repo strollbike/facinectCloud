@@ -11,16 +11,20 @@ import (
 // --- Entries ---
 
 type Entry struct {
-	ID            int64  `json:"id"`
-	TournamentID  int64  `json:"tournament_id"`
-	Category      string `json:"category"`
-	Gender        string `json:"gender"`
-	PlayerName    string `json:"player_name"`
-	Phone         string `json:"phone,omitempty"`
-	Email         string `json:"email,omitempty"`
-	PaymentStatus string `json:"payment_status"`
-	Status        string `json:"status"`
-	CreatedAt     string `json:"created_at,omitempty"`
+	ID              int64   `json:"id"`
+	TournamentID    int64   `json:"tournament_id"`
+	Category        string  `json:"category"`
+	Gender          string  `json:"gender"`
+	PlayerName      string  `json:"player_name"`
+	Phone           string  `json:"phone,omitempty"`
+	Email           string  `json:"email,omitempty"`
+	PaymentStatus   string  `json:"payment_status"`
+	PaymentMode     string  `json:"payment_mode,omitempty"`
+	PaidAmount      float64 `json:"paid_amount,omitempty"`
+	TransactionID   string  `json:"transaction_id,omitempty"`
+	GatewayOrderID  string  `json:"gateway_order_id,omitempty"`
+	Status          string  `json:"status"`
+	CreatedAt       string  `json:"created_at,omitempty"`
 }
 
 type EntryInput struct {
@@ -33,11 +37,31 @@ type EntryInput struct {
 	Status        string `json:"status"`
 }
 
+const entrySelectCols = `
+id, tournament_id, COALESCE(category,''), COALESCE(gender,''),
+player_name, COALESCE(phone,''), COALESCE(email,''),
+payment_status, COALESCE(payment_mode,''), COALESCE(paid_amount,0)::float8,
+COALESCE(transaction_id,''), COALESCE(gateway_order_id,''),
+status, created_at::text`
+
+func scanEntry(row scannable) (*Entry, error) {
+	var e Entry
+	err := row.Scan(
+		&e.ID, &e.TournamentID, &e.Category, &e.Gender,
+		&e.PlayerName, &e.Phone, &e.Email,
+		&e.PaymentStatus, &e.PaymentMode, &e.PaidAmount,
+		&e.TransactionID, &e.GatewayOrderID,
+		&e.Status, &e.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
 func (s *Service) ListEntries(ctx context.Context, tournamentID int64) ([]Entry, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-SELECT id, tournament_id, COALESCE(category,''), COALESCE(gender,''),
-       player_name, COALESCE(phone,''), COALESCE(email,''),
-       payment_status, status, created_at::text
+SELECT `+entrySelectCols+`
 FROM tournament_entries WHERE tournament_id=$1 ORDER BY id`, tournamentID)
 	if err != nil {
 		return nil, err
@@ -45,12 +69,11 @@ FROM tournament_entries WHERE tournament_id=$1 ORDER BY id`, tournamentID)
 	defer rows.Close()
 	out := []Entry{}
 	for rows.Next() {
-		var e Entry
-		if err := rows.Scan(&e.ID, &e.TournamentID, &e.Category, &e.Gender,
-			&e.PlayerName, &e.Phone, &e.Email, &e.PaymentStatus, &e.Status, &e.CreatedAt); err != nil {
+		e, err := scanEntry(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, e)
+		out = append(out, *e)
 	}
 	return out, rows.Err()
 }
@@ -62,6 +85,11 @@ func (s *Service) CreateEntry(ctx context.Context, tournamentID int64, in EntryI
 	}
 	pay := strings.TrimSpace(in.PaymentStatus)
 	if pay == "" {
+		pay = "pending"
+	}
+	// Never trust client "paid" — online settle via paygateway checkout/confirm/webhook.
+	switch strings.ToLower(pay) {
+	case "paid", "completed", "success":
 		pay = "pending"
 	}
 	st := strings.TrimSpace(in.Status)
@@ -89,9 +117,9 @@ RETURNING id`,
 	if err != nil {
 		return nil, err
 	}
-	// Paid/spot on create → confirmation WA (PHP webhook / spot path).
-	if isPaidTournamentStatus(pay) {
-		s.notifyTournamentRegistrationConfirmation(ctx, entry, 0, "")
+	// Spot on create → confirmation WA (PHP spot path). Paid only after gateway verify.
+	if strings.EqualFold(pay, "spot") {
+		s.notifyTournamentRegistrationConfirmation(ctx, entry, 0, "spot")
 	}
 	return entry, nil
 }
@@ -101,18 +129,10 @@ func (s *Service) GetEntry(ctx context.Context, id int64) (*Entry, error) {
 }
 
 func (s *Service) getEntry(ctx context.Context, id int64) (*Entry, error) {
-	var e Entry
-	err := s.DB.QueryRowContext(ctx, `
-SELECT id, tournament_id, COALESCE(category,''), COALESCE(gender,''),
-       player_name, COALESCE(phone,''), COALESCE(email,''),
-       payment_status, status, created_at::text
-FROM tournament_entries WHERE id=$1`, id).Scan(
-		&e.ID, &e.TournamentID, &e.Category, &e.Gender,
-		&e.PlayerName, &e.Phone, &e.Email, &e.PaymentStatus, &e.Status, &e.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	return &e, nil
+	row := s.DB.QueryRowContext(ctx, `
+SELECT `+entrySelectCols+`
+FROM tournament_entries WHERE id=$1`, id)
+	return scanEntry(row)
 }
 
 func (s *Service) UpdateEntryPayment(ctx context.Context, entryID int64, paymentStatus string) (*Entry, error) {
@@ -166,6 +186,7 @@ type Fixture struct {
 	Winner        string `json:"winner,omitempty"`
 	Status        string `json:"status"`
 	Court         string `json:"court,omitempty"`
+	MatchTime     string `json:"match_time,omitempty"`
 	RefID         *int64 `json:"ref_id,omitempty"`
 	PoolNo        *int   `json:"pool_no,omitempty"`
 	RoundName     string `json:"round_name,omitempty"`
@@ -189,7 +210,7 @@ type ScoreInput struct {
 const fixtureSelectCols = `
 id, tournament_id, COALESCE(category,''), COALESCE(gender,''),
 round_no, match_no, team1, team2, score1, score2,
-COALESCE(winner,''), status, COALESCE(court,''), ref_id,
+COALESCE(winner,''), status, COALESCE(court,''), COALESCE(match_time,''), ref_id,
 pool_no, COALESCE(round_name,''), is_bye,
 next_match_id, COALESCE(next_slot,''), source_match1_id, source_match2_id, locked,
 created_at::text, updated_at::text`
@@ -284,7 +305,7 @@ func scanFixture(row scannable) (*Fixture, error) {
 	err := row.Scan(
 		&f.ID, &f.TournamentID, &f.Category, &f.Gender,
 		&f.RoundNo, &f.MatchNo, &f.Team1, &f.Team2, &s1, &s2,
-		&f.Winner, &f.Status, &f.Court, &refID,
+		&f.Winner, &f.Status, &f.Court, &f.MatchTime, &refID,
 		&pool, &f.RoundName, &f.IsBye,
 		&nextID, &f.NextSlot, &src1, &src2, &f.Locked,
 		&f.CreatedAt, &f.UpdatedAt,

@@ -18,12 +18,15 @@ import (
 // --- Knockout / preview / walkover / reset ---
 
 type KnockoutInput struct {
-	Category         string `json:"category"`
-	Gender           string `json:"gender"`
-	PairingMode      string `json:"pairingMode"`
-	BracketMethod    string `json:"bracketMethod"`
-	EliminatedPerPool *int  `json:"eliminatedPerPool"`
-	Force            bool   `json:"force"`
+	Category          string   `json:"category"`
+	Gender            string   `json:"gender"`
+	PairingMode       string   `json:"pairingMode"`
+	BracketMethod     string   `json:"bracketMethod"`
+	EliminatedPerPool *int     `json:"eliminatedPerPool"`
+	Force             bool     `json:"force"`
+	StartTime         string   `json:"startTime"`
+	MatchDuration     int      `json:"matchDuration"`
+	Courts            []string `json:"courts"`
 }
 
 type PreviewInput struct {
