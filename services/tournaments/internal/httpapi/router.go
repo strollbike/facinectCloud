@@ -37,6 +37,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tournaments/entries/{entryId}/payment", s.withAuth(s.handleEntryPayment))
 
 	mux.HandleFunc("GET /v1/tournaments/tournaments/{tournamentId}/fixtures", s.withAuth(s.handleListFixtures))
+	mux.HandleFunc("GET /v1/tournaments/tournaments/{tournamentId}/standings", s.withAuth(s.handleStandings))
 	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/fixtures", s.withAuth(s.handleGenerateFixtures))
 	mux.HandleFunc("POST /v1/tournaments/fixtures/{fixtureId}/score", s.withAuth(s.handleFixtureScore))
 
@@ -398,6 +399,24 @@ func (s *Server) handleListFixtures(w http.ResponseWriter, r *http.Request, ac *
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"fixtures": list})
+}
+
+func (s *Server) handleStandings(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	cur, ok := s.tournamentFacility(w, r, ac)
+	if !ok {
+		return
+	}
+	cat := strings.TrimSpace(r.URL.Query().Get("category"))
+	gen := strings.TrimSpace(r.URL.Query().Get("gender"))
+	tables, err := s.Tournaments.BuildStandings(r.Context(), cur.ID, cat, gen)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"standings": tables,
+	})
 }
 
 func (s *Server) handleGenerateFixtures(w http.ResponseWriter, r *http.Request, ac *authCtx) {
