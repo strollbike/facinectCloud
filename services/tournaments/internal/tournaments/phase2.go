@@ -356,15 +356,17 @@ func isCompletedFixtureStatus(st string) bool {
 // --- Score live ---
 
 type ScoreEvent struct {
-	ID           int64  `json:"id"`
-	TournamentID int64  `json:"tournament_id"`
-	Category     string `json:"category"`
-	MatchID      int64  `json:"match_id"`
-	Score1       *int   `json:"score1,omitempty"`
-	Score2       *int   `json:"score2,omitempty"`
-	Status       string `json:"status,omitempty"`
-	Winner       string `json:"winner,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
+	ID           int64                  `json:"id"`
+	TournamentID int64                  `json:"tournament_id"`
+	Category     string                 `json:"category"`
+	MatchID      int64                  `json:"match_id"`
+	MatchId      int64                  `json:"matchId,omitempty"`
+	Score1       *int                   `json:"score1,omitempty"`
+	Score2       *int                   `json:"score2,omitempty"`
+	Status       string                 `json:"status,omitempty"`
+	Winner       string                 `json:"winner,omitempty"`
+	CreatedAt    string                 `json:"created_at,omitempty"`
+	Payload      map[string]interface{} `json:"payload,omitempty"`
 }
 
 func (s *Service) PollScoreEvents(ctx context.Context, tournamentID int64, category string, afterID int64, waitSec int) ([]ScoreEvent, error) {
@@ -393,16 +395,18 @@ func (s *Service) PollScoreEvents(ctx context.Context, tournamentID int64, categ
 
 func (s *Service) listScoreEvents(ctx context.Context, tournamentID int64, category string, afterID int64) ([]ScoreEvent, error) {
 	q := `
-SELECT id, tournament_id, COALESCE(category,''), match_id,
-       score1, score2, COALESCE(status,''), COALESCE(winner,''), created_at::text
-FROM tournament_score_events
-WHERE tournament_id=$1 AND id>$2`
+SELECT e.id, e.tournament_id, COALESCE(e.category,''), e.match_id,
+       e.score1, e.score2, COALESCE(e.status,''), COALESCE(e.winner,''), e.created_at::text,
+       COALESCE(f.team1,''), COALESCE(f.team2,''), COALESCE(f.court,''), COALESCE(f.gender,'')
+FROM tournament_score_events e
+LEFT JOIN tournament_fixtures f ON f.id = e.match_id
+WHERE e.tournament_id=$1 AND e.id>$2`
 	args := []interface{}{tournamentID, afterID}
 	if strings.TrimSpace(category) != "" {
-		q += ` AND category=$3`
+		q += ` AND e.category=$3`
 		args = append(args, strings.TrimSpace(category))
 	}
-	q += ` ORDER BY id ASC LIMIT 100`
+	q += ` ORDER BY e.id ASC LIMIT 100`
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -412,8 +416,10 @@ WHERE tournament_id=$1 AND id>$2`
 	for rows.Next() {
 		var e ScoreEvent
 		var s1, s2 sql.NullInt64
+		var p1, p2, court, gender string
 		if err := rows.Scan(&e.ID, &e.TournamentID, &e.Category, &e.MatchID,
-			&s1, &s2, &e.Status, &e.Winner, &e.CreatedAt); err != nil {
+			&s1, &s2, &e.Status, &e.Winner, &e.CreatedAt,
+			&p1, &p2, &court, &gender); err != nil {
 			return nil, err
 		}
 		if s1.Valid {
@@ -423,6 +429,10 @@ WHERE tournament_id=$1 AND id>$2`
 		if s2.Valid {
 			v := int(s2.Int64)
 			e.Score2 = &v
+		}
+		e.MatchId = e.MatchID
+		e.Payload = map[string]interface{}{
+			"player1": p1, "player2": p2, "court": court, "gender": gender,
 		}
 		out = append(out, e)
 	}
@@ -506,6 +516,7 @@ type AssignCourtInput struct {
 	Gender   string `json:"gender"`
 	Court    string `json:"court"`
 	Email    string `json:"email"`
+	Phone    string `json:"phone"`
 	RefID    *int64 `json:"ref_id"`
 	PoolNo   *int   `json:"pool_no"`
 	RoundNo  *int   `json:"round_no"`
@@ -528,37 +539,11 @@ ORDER BY r.id DESC`, facilityID)
 }
 
 func (s *Service) AssignRefereeCourt(ctx context.Context, tournamentID int64, in AssignCourtInput) (*Referee, error) {
-	court := strings.TrimSpace(in.Court)
-	if tournamentID <= 0 || court == "" {
-		return nil, fmt.Errorf("invalid_assign")
-	}
-	var pool, round, refID interface{}
-	if in.PoolNo != nil {
-		pool = *in.PoolNo
-	}
-	if in.RoundNo != nil {
-		round = *in.RoundNo
-	}
-	if in.RefID != nil {
-		refID = *in.RefID
-	}
-	var id int64
-	err := s.DB.QueryRowContext(ctx, `
-INSERT INTO tournament_referees
-  (tournament_id, category, gender, court, email, ref_id, pool_no, round_no)
-VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8)
-RETURNING id`,
-		tournamentID,
-		strings.TrimSpace(in.Category),
-		strings.TrimSpace(in.Gender),
-		court,
-		strings.TrimSpace(in.Email),
-		refID, pool, round,
-	).Scan(&id)
+	res, err := s.AssignRefereeCourtWithPIN(ctx, tournamentID, in)
 	if err != nil {
 		return nil, err
 	}
-	return s.getReferee(ctx, id)
+	return res.Referee, nil
 }
 
 func (s *Service) UnassignRefereeCourt(ctx context.Context, tournamentID int64, in AssignCourtInput) error {
