@@ -120,13 +120,41 @@ CREATE TABLE IF NOT EXISTS tournament_referees (
   gender           VARCHAR(32) NOT NULL DEFAULT '',
   court            VARCHAR(64) NOT NULL DEFAULT '',
   email            VARCHAR(191) NULL,
+  phone            VARCHAR(32) NULL,
   ref_id           BIGINT NULL,
   pool_no          INT NULL,
   round_no         INT NULL,
+  status           VARCHAR(32) NOT NULL DEFAULT 'active',
+  pin_hash         TEXT NULL,
+  pin_expires_at   TIMESTAMPTZ NULL,
+  access_token     VARCHAR(64) NULL,
+  assigned_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_tournament_referees_tid
   ON tournament_referees(tournament_id, category, court);
+ALTER TABLE tournament_referees ADD COLUMN IF NOT EXISTS phone VARCHAR(32) NULL;
+ALTER TABLE tournament_referees ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'active';
+ALTER TABLE tournament_referees ADD COLUMN IF NOT EXISTS pin_hash TEXT NULL;
+ALTER TABLE tournament_referees ADD COLUMN IF NOT EXISTS pin_expires_at TIMESTAMPTZ NULL;
+ALTER TABLE tournament_referees ADD COLUMN IF NOT EXISTS access_token VARCHAR(64) NULL;
+ALTER TABLE tournament_referees ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+CREATE INDEX IF NOT EXISTS idx_tournament_referees_ref
+  ON tournament_referees(ref_id) WHERE ref_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS tournament_ref_profiles (
+  ref_id            BIGSERIAL PRIMARY KEY,
+  email             VARCHAR(191) NOT NULL,
+  phone             VARCHAR(32) NULL,
+  full_name         VARCHAR(191) NULL,
+  referee_identity  VARCHAR(32) NULL,
+  is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (email)
+);
+CREATE INDEX IF NOT EXISTS idx_tournament_ref_profiles_identity
+  ON tournament_ref_profiles(referee_identity) WHERE referee_identity IS NOT NULL AND referee_identity <> '';
 
 CREATE TABLE IF NOT EXISTS tournament_form_fields (
   tournament_id    BIGINT PRIMARY KEY REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -165,9 +193,24 @@ ALTER TABLE tournament_fixtures
   ADD COLUMN IF NOT EXISTS source_match2_id BIGINT NULL;
 ALTER TABLE tournament_fixtures
   ADD COLUMN IF NOT EXISTS locked BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE tournament_fixtures
+  ADD COLUMN IF NOT EXISTS match_time VARCHAR(16) NULL;
+
+ALTER TABLE tournament_entries
+  ADD COLUMN IF NOT EXISTS payment_mode VARCHAR(32) NULL;
+ALTER TABLE tournament_entries
+  ADD COLUMN IF NOT EXISTS paid_amount NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE tournament_entries
+  ADD COLUMN IF NOT EXISTS transaction_id VARCHAR(128) NULL;
+ALTER TABLE tournament_entries
+  ADD COLUMN IF NOT EXISTS gateway_order_id VARCHAR(128) NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tournament_entries_txn
+  ON tournament_entries(transaction_id) WHERE transaction_id IS NOT NULL AND transaction_id <> '';
 
 ALTER TABLE tournaments
   ADD COLUMN IF NOT EXISTS group_url TEXT NULL;
+ALTER TABLE tournaments
+  ADD COLUMN IF NOT EXISTS entries_open BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE tournaments
   ADD COLUMN IF NOT EXISTS allow_full_payment BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE tournaments
@@ -176,8 +219,6 @@ ALTER TABLE tournaments
   ADD COLUMN IF NOT EXISTS allow_spot_payment BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE tournaments
   ADD COLUMN IF NOT EXISTS advance_amount NUMERIC(12,2) NOT NULL DEFAULT 0;
-ALTER TABLE tournaments
-  ADD COLUMN IF NOT EXISTS entries_open BOOLEAN NOT NULL DEFAULT TRUE;
 
 CREATE TABLE IF NOT EXISTS tournament_categories (
   id               BIGSERIAL PRIMARY KEY,

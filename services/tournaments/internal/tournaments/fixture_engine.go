@@ -3,18 +3,22 @@ package tournaments
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 )
 
 // GenerateFixturesInput matches StrollX generateFixtures body.
 type GenerateFixturesInput struct {
-	Category         string `json:"category"`
-	Gender           string `json:"gender"`
-	MatchType        string `json:"matchType"`
-	PoolDistribution string `json:"poolDistribution"`
-	MatchesPerPool   int    `json:"matchesPerPool"`
-	PairingMode      string `json:"pairingMode"`
-	Force            bool   `json:"force"`
+	Category         string   `json:"category"`
+	Gender           string   `json:"gender"`
+	MatchType        string   `json:"matchType"`
+	PoolDistribution string   `json:"poolDistribution"`
+	MatchesPerPool   int      `json:"matchesPerPool"`
+	PairingMode      string   `json:"pairingMode"`
+	Force            bool     `json:"force"`
+	StartTime        string   `json:"startTime"`
+	MatchDuration    int      `json:"matchDuration"`
+	Courts           []string `json:"courts"`
 }
 
 // GenerateFixturesEx builds pool/RR fixtures (PHP generate_fixtures).
@@ -66,6 +70,8 @@ func (s *Service) GenerateFixturesEx(ctx context.Context, tournamentID int64, in
 		mode = "academy_separated"
 	}
 
+	sched := ScheduleOpts{Courts: in.Courts, StartTime: in.StartTime, MatchDuration: in.MatchDuration}
+	playable := 0
 	matchNo := 0
 	for key, list := range groups {
 		parts := strings.SplitN(key, "|", 2)
@@ -110,6 +116,7 @@ func (s *Service) GenerateFixturesEx(ctx context.Context, tournamentID int64, in
 			pairs := RRPairsWithinPool(poolPlayers, capPerPool)
 			for _, pair := range pairs {
 				matchNo++
+				court, mt := s.scheduleForInsert(ctx, tournamentID, sched, &playable, false)
 				if err := s.insertFixtureRow(ctx, insertFixtureArgs{
 					TournamentID: tournamentID,
 					Category:     gCat,
@@ -121,6 +128,8 @@ func (s *Service) GenerateFixturesEx(ctx context.Context, tournamentID int64, in
 					Status:       "scheduled",
 					PoolNo:       &poolNo,
 					RoundName:    "Pool",
+					Court:        court,
+					MatchTime:    mt,
 					Locked:       true,
 				}); err != nil {
 					return nil, err
@@ -150,6 +159,8 @@ type insertFixtureArgs struct {
 	NextSlot     string
 	Source1      *int64
 	Source2      *int64
+	Court        string
+	MatchTime    string
 	Locked       bool
 }
 
@@ -176,11 +187,11 @@ func (s *Service) insertFixtureRow(ctx context.Context, a insertFixtureArgs) err
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO tournament_fixtures
   (tournament_id, category, gender, round_no, match_no, team1, team2,
-   score1, score2, winner, status, pool_no, round_name, is_bye,
+   score1, score2, winner, status, court, match_time, pool_no, round_name, is_bye,
    next_match_id, next_slot, source_match1_id, source_match2_id, locked)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12,NULLIF($13,''),$14,$15,NULLIF($16,''),$17,$18,$19)`,
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,NULLIF($12,''),NULLIF($13,''),$14,NULLIF($15,''),$16,$17,NULLIF($18,''),$19,$20,$21)`,
 		a.TournamentID, a.Category, a.Gender, a.RoundNo, a.MatchNo, a.Team1, a.Team2,
-		s1, s2, a.Winner, a.Status, pool, a.RoundName, a.IsBye,
+		s1, s2, a.Winner, a.Status, a.Court, a.MatchTime, pool, a.RoundName, a.IsBye,
 		next, a.NextSlot, src1, src2, a.Locked,
 	)
 	return err
@@ -256,6 +267,8 @@ func (s *Service) generateInitialKnockout(ctx context.Context, tournamentID int6
 	}
 	_ = sitOuts // used when advancing from prelim via GenerateNextRound
 
+	sched := ScheduleOpts{Courts: in.Courts, StartTime: in.StartTime, MatchDuration: in.MatchDuration}
+	playable := 0
 	matchNo := 0
 	for _, p := range pairs {
 		matchNo++
@@ -275,6 +288,7 @@ func (s *Service) generateInitialKnockout(ctx context.Context, tournamentID int6
 				s1, s2 = &zero, &one
 			}
 		}
+		court, mt := s.scheduleForInsert(ctx, tournamentID, sched, &playable, p.IsBye)
 		if err := s.insertFixtureRow(ctx, insertFixtureArgs{
 			TournamentID: tournamentID,
 			Category:     cat,
@@ -289,6 +303,8 @@ func (s *Service) generateInitialKnockout(ctx context.Context, tournamentID int6
 			Score2:       s2,
 			RoundName:    plan.FirstRoundLabel,
 			IsBye:        p.IsBye,
+			Court:        court,
+			MatchTime:    mt,
 			Locked:       true,
 		}); err != nil {
 			return nil, err
@@ -333,6 +349,17 @@ func (s *Service) GenerateNextRound(ctx context.Context, tournamentID int64, in 
 	if len(curRound) == 0 {
 		return nil, fmt.Errorf("no_current_round")
 	}
+
+	// Stage D: pool stage (R1 with pool_no) → hybrid qualifiers, not match winners.
+	if maxRound == 1 && hasPoolStage(curRound) {
+		rules := SportRulesFromKnockout(in)
+		qualified, err := HybridQualifiers(curRound, rules)
+		if err != nil {
+			return nil, err
+		}
+		return s.insertKnockoutRound(ctx, tournamentID, cat, gen, maxRound+1, qualified, map[string]int64{})
+	}
+
 	for _, f := range curRound {
 		if !isCompletedFixtureStatus(f.Status) || strings.TrimSpace(f.Winner) == "" {
 			return nil, fmt.Errorf("round_incomplete")
@@ -383,20 +410,6 @@ func (s *Service) GenerateNextRound(ctx context.Context, tournamentID int64, in 
 	if len(qualified) < 2 {
 		return nil, fmt.Errorf("need_at_least_2_sides")
 	}
-	if len(qualified) == 2 && maxRound > 0 {
-		// May still need final
-	}
-
-	pairs := FirstRoundPairs(qualified) // later rounds always bye-pad
-	nextRoundNo := maxRound + 1
-	label := RoundLabel(len(pairs), nextRoundNo)
-	if len(pairs) == 1 {
-		label = "Final"
-	} else if len(pairs) == 2 {
-		label = "Semi-Final"
-	}
-
-	// Map source match ids for winners where possible.
 	winnerSource := map[string]int64{}
 	for _, f := range curRound {
 		w := strings.TrimSpace(f.Winner)
@@ -404,7 +417,23 @@ func (s *Service) GenerateNextRound(ctx context.Context, tournamentID int64, in 
 			winnerSource[w] = f.ID
 		}
 	}
+	return s.insertKnockoutRound(ctx, tournamentID, cat, gen, maxRound+1, qualified, winnerSource)
+}
 
+func (s *Service) insertKnockoutRound(ctx context.Context, tournamentID int64, cat, gen string, nextRoundNo int, qualified []string, winnerSource map[string]int64) ([]Fixture, error) {
+	if len(qualified) < 2 {
+		return nil, fmt.Errorf("need_at_least_2_sides")
+	}
+	pairs := FirstRoundPairs(qualified)
+	label := RoundLabel(len(pairs), nextRoundNo)
+	if len(pairs) == 1 {
+		label = "Final"
+	} else if len(pairs) == 2 {
+		label = "Semi-Final"
+	}
+	poolZero := 0
+	sched := ScheduleOpts{}
+	playable := 0
 	matchNo := 0
 	for _, p := range pairs {
 		matchNo++
@@ -433,16 +462,17 @@ func (s *Service) GenerateNextRound(ctx context.Context, tournamentID int64, in 
 				s1, s2 = &zero, &one
 			}
 		}
+		court, mt := s.scheduleForInsert(ctx, tournamentID, sched, &playable, p.IsBye)
 		var id int64
 		err := s.DB.QueryRowContext(ctx, `
 INSERT INTO tournament_fixtures
   (tournament_id, category, gender, round_no, match_no, team1, team2,
-   score1, score2, winner, status, round_name, is_bye,
+   score1, score2, winner, status, court, match_time, pool_no, round_name, is_bye,
    source_match1_id, source_match2_id, locked)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12,$13,$14,$15,TRUE)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,NULLIF($12,''),NULLIF($13,''),$14,$15,$16,$17,$18,TRUE)
 RETURNING id`,
 			tournamentID, cat, gen, nextRoundNo, matchNo, p.Player1, p.Player2,
-			ptrOrNil(s1), ptrOrNil(s2), winner, status, label, p.IsBye,
+			ptrOrNil(s1), ptrOrNil(s2), winner, status, court, mt, poolZero, label, p.IsBye,
 			ptrI64OrNil(src1), ptrI64OrNil(src2),
 		).Scan(&id)
 		if err != nil {
@@ -462,6 +492,42 @@ RETURNING id`,
 		}
 	}
 	return s.listFixturesFiltered(ctx, tournamentID, cat, gen)
+}
+
+// BuildStandings returns ranked pool tables (PHP TournamentEngine::buildStandings).
+func (s *Service) BuildStandings(ctx context.Context, tournamentID int64, category, gender string) (map[string][]StandingRow, error) {
+	list, err := s.listFixturesFiltered(ctx, tournamentID, category, gender)
+	if err != nil {
+		return nil, err
+	}
+	rules := DefaultSportRules()
+	byPool := BuildStandingsByPool(list, rules)
+	out := map[string][]StandingRow{}
+	keys := make([]int, 0, len(byPool))
+	for k := range byPool {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	for _, k := range keys {
+		rowsMap := byPool[k]
+		rows := make([]*StandingRow, 0, len(rowsMap))
+		for _, r := range rowsMap {
+			rows = append(rows, r)
+		}
+		pm := []Fixture{}
+		for _, m := range list {
+			if m.PoolNo != nil && *m.PoolNo == k {
+				pm = append(pm, m)
+			}
+		}
+		ranked := RankStandings(rows, rules.RankingRules, pm)
+		arr := make([]StandingRow, 0, len(ranked))
+		for _, r := range ranked {
+			arr = append(arr, *r)
+		}
+		out[fmt.Sprintf("%d", k)] = arr
+	}
+	return out, nil
 }
 
 func ptrOrNil(p *int) interface{} {
