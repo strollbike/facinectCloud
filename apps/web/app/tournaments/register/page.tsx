@@ -121,18 +121,56 @@ function formatDateBadge(iso?: string) {
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
+function debugPopup(title: string, detail?: unknown) {
+  let body = '';
+  if (detail === undefined || detail === null) body = '';
+  else if (typeof detail === 'string') body = detail;
+  else {
+    try {
+      body = JSON.stringify(detail, null, 2);
+    } catch {
+      body = String(detail);
+    }
+  }
+  const msg = body ? `${title}\n\n${body}` : title;
+  // Keep console copy for DevTools debugging.
+  // eslint-disable-next-line no-console
+  console.error('[tournaments/register]', title, detail);
+  window.alert(msg);
+}
+
 async function publicFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/v1/tournaments${path}`, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+  const url = `/v1/tournaments${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(init?.headers || {}),
+      },
+    });
+  } catch (e) {
+    throw new Error(
+      `network_error calling ${url}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  const rawText = await res.text();
+  let data: T & { error?: string; message?: string; success?: boolean } = {} as T & {
+    error?: string;
+    message?: string;
+    success?: boolean;
+  };
+  try {
+    data = rawText ? (JSON.parse(rawText) as typeof data) : data;
+  } catch {
+    throw new Error(`http_${res.status} non_json from ${url}: ${rawText.slice(0, 400)}`);
+  }
   if (!res.ok) {
-    throw new Error(data.error || `http_${res.status}`);
+    throw new Error(
+      `http_${res.status} ${data.error || data.message || 'request_failed'} | ${url} | ${rawText.slice(0, 500)}`,
+    );
   }
   return data;
 }
@@ -659,6 +697,19 @@ function RegisterInner() {
     !busy &&
     (entryFee <= 0 || (payOptions.length > 0 && !!payMode));
 
+  function submitBlockReason(): string | null {
+    if (!reviewing) return 'Form is not in review step yet.';
+    if (busy) return 'Request already in progress.';
+    if (!agreed) return 'Please open Terms & Conditions and tap “I Have Read & Agree”.';
+    if (entryFee > 0 && payOptions.length === 0) {
+      return 'No payment options enabled for this tournament (full/advance/spot).';
+    }
+    if (entryFee > 0 && !payMode) return 'Please select a payment option.';
+    if (!tournament) return 'Tournament not loaded.';
+    if (!category) return 'Please select a category.';
+    return null;
+  }
+
   function captainPhone() {
     const card = players[0] || {};
     for (const [k, v] of Object.entries(card)) {
@@ -698,36 +749,74 @@ function RegisterInner() {
   }
 
   async function handlePayment() {
-    if (!tournament || !category) return;
-    if (entryFee > 0 && payOptions.length > 0 && !payMode) {
-      alert('Please select a payment option.');
+    const blocked = submitBlockReason();
+    if (blocked) {
+      debugPopup('Cannot submit registration', {
+        reason: blocked,
+        agreed,
+        payMode,
+        entryFee,
+        payOptions: payOptions.map((o) => o.mode),
+        category,
+        tournamentId: tournament?.id,
+        step,
+      });
+      return;
+    }
+    if (!tournament || !category) {
+      debugPopup('Cannot submit registration', 'Tournament or category missing.');
       return;
     }
     const mode = entryFee <= 0 ? 'full' : payMode || 'full';
+    const payload = {
+      category,
+      payment_mode: mode,
+      phone: captainPhone(),
+      players: playerPayload(),
+      player_name: playerPayload()[0]?.player_name || '',
+      gender: playerPayload()[0]?.gender || '',
+      email: playerPayload()[0]?.email || '',
+    };
+    if (!payload.phone) {
+      debugPopup('Cannot submit registration', {
+        reason: 'Captain WhatsApp / phone is empty.',
+        players: payload.players,
+      });
+      return;
+    }
+    if (!payload.player_name) {
+      debugPopup('Cannot submit registration', {
+        reason: 'Captain player name is empty.',
+        players: payload.players,
+      });
+      return;
+    }
+
     setBusy(true);
+    const registerPath = `/public/tournaments/${tournament.id}/register`;
     try {
-      const payload = {
-        category,
-        payment_mode: mode,
-        phone: captainPhone(),
-        players: playerPayload(),
-        player_name: playerPayload()[0]?.player_name || '',
-        gender: playerPayload()[0]?.gender || '',
-        email: playerPayload()[0]?.email || '',
-      };
+      debugPopup('Submitting registration…', {
+        path: `/v1/tournaments${registerPath}`,
+        payload,
+      });
       const res = await publicFetch<{
         entry?: { id: number; category?: string; payment_status?: string; payment_mode?: string };
         checkout?: Checkout;
         checkout_error?: string;
         message?: string;
-      }>(`/public/tournaments/${tournament.id}/register`, {
+        success?: boolean;
+      }>(registerPath, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
 
+      debugPopup('Register API response', res);
+
       const entry = res.entry;
       const checkout = res.checkout;
-      if (!entry?.id) throw new Error('register_failed');
+      if (!entry?.id) {
+        throw new Error(`register_failed: missing entry.id in response`);
+      }
 
       if (mode === 'spot' || !checkout || checkout.spot || (checkout.amount || 0) <= 0) {
         setSuccess({
@@ -741,9 +830,14 @@ function RegisterInner() {
       }
 
       if (!checkout.order_id || !checkout.key_id) {
-        throw new Error(res.checkout_error || 'checkout_unavailable');
+        throw new Error(
+          res.checkout_error ||
+            `checkout_unavailable: order_id=${checkout.order_id || ''} key_id=${checkout.key_id || ''}`,
+        );
       }
-      if (!window.Razorpay) throw new Error('razorpay_sdk_missing');
+      if (!window.Razorpay) {
+        throw new Error('razorpay_sdk_missing — checkout.js not loaded');
+      }
 
       const rzp = new window.Razorpay({
         key: checkout.key_id,
@@ -758,7 +852,8 @@ function RegisterInner() {
           razorpay_signature?: string;
         }) => {
           try {
-            await publicFetch(`/public/entries/${entry.id}/confirm-payment`, {
+            debugPopup('Razorpay success — confirming payment', response);
+            const confirmed = await publicFetch(`/public/entries/${entry.id}/confirm-payment`, {
               method: 'POST',
               body: JSON.stringify({
                 order_id: response.razorpay_order_id || checkout.order_id,
@@ -766,6 +861,7 @@ function RegisterInner() {
                 signature: response.razorpay_signature,
               }),
             });
+            debugPopup('Confirm payment response', confirmed);
             setSuccess({
               category: entry.category || category,
               code: String(entry.id),
@@ -773,18 +869,21 @@ function RegisterInner() {
               payment_status: 'Paid',
             });
           } catch (e) {
-            alert(e instanceof Error ? e.message : 'confirm_failed');
+            debugPopup('Confirm payment failed', e instanceof Error ? e.message : e);
           } finally {
             setBusy(false);
           }
         },
         modal: {
-          ondismiss: () => setBusy(false),
+          ondismiss: () => {
+            debugPopup('Razorpay dismissed', 'Payment popup closed without completing.');
+            setBusy(false);
+          },
         },
       });
       rzp.open();
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'register_failed');
+      debugPopup('Register / checkout failed', e instanceof Error ? e.message : e);
       setBusy(false);
     }
   }
@@ -1294,7 +1393,10 @@ function RegisterInner() {
             <button
               type="button"
               className={`${styles.btn} ${styles.btnSubmit}`}
-              disabled={!canSubmit}
+              disabled={busy}
+              aria-disabled={!canSubmit}
+              title={submitBlockReason() || undefined}
+              style={!canSubmit && !busy ? { opacity: 0.75 } : undefined}
               onClick={handlePayment}
             >
               {busy ? (
