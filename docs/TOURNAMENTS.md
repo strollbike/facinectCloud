@@ -31,6 +31,8 @@ docker compose up -d --build tournaments
 | `JWT_PUBLIC_KEY_PATH` | RS256 public key (same as identity) |
 | `JWT_ISSUER` / `JWT_AUDIENCE` | Must match identity tokens |
 
-Phase 2 (later): categories, entries, fixtures/KO, live scoring, publish.
+Phase 2: entries, fixtures/KO, live scoring, publish, form fields.
+
+Categories + payment flags persist on create/update (`tournament_categories`, `allow_*_payment`). See `docs/tournaments_test_cases.md`.
 
 No MySQL stored procedures — plain SQL + transactions.
