@@ -153,22 +153,30 @@ func isPaidTournamentStatus(status string) bool {
 // --- Fixtures ---
 
 type Fixture struct {
-	ID           int64  `json:"id"`
-	TournamentID int64  `json:"tournament_id"`
-	Category     string `json:"category"`
-	Gender       string `json:"gender"`
-	RoundNo      int    `json:"round_no"`
-	MatchNo      int    `json:"match_no"`
-	Team1        string `json:"team1"`
-	Team2        string `json:"team2"`
-	Score1       *int   `json:"score1,omitempty"`
-	Score2       *int   `json:"score2,omitempty"`
-	Winner       string `json:"winner,omitempty"`
-	Status       string `json:"status"`
-	Court        string `json:"court,omitempty"`
-	RefID        *int64 `json:"ref_id,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	UpdatedAt    string `json:"updated_at,omitempty"`
+	ID            int64  `json:"id"`
+	TournamentID  int64  `json:"tournament_id"`
+	Category      string `json:"category"`
+	Gender        string `json:"gender"`
+	RoundNo       int    `json:"round_no"`
+	MatchNo       int    `json:"match_no"`
+	Team1         string `json:"team1"`
+	Team2         string `json:"team2"`
+	Score1        *int   `json:"score1,omitempty"`
+	Score2        *int   `json:"score2,omitempty"`
+	Winner        string `json:"winner,omitempty"`
+	Status        string `json:"status"`
+	Court         string `json:"court,omitempty"`
+	RefID         *int64 `json:"ref_id,omitempty"`
+	PoolNo        *int   `json:"pool_no,omitempty"`
+	RoundName     string `json:"round_name,omitempty"`
+	IsBye         bool   `json:"is_bye"`
+	NextMatchID   *int64 `json:"next_match_id,omitempty"`
+	NextSlot      string `json:"next_slot,omitempty"`
+	SourceMatch1  *int64 `json:"source_match1_id,omitempty"`
+	SourceMatch2  *int64 `json:"source_match2_id,omitempty"`
+	Locked        bool   `json:"locked"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
 }
 
 type ScoreInput struct {
@@ -178,12 +186,17 @@ type ScoreInput struct {
 	Winner string `json:"winner"`
 }
 
+const fixtureSelectCols = `
+id, tournament_id, COALESCE(category,''), COALESCE(gender,''),
+round_no, match_no, team1, team2, score1, score2,
+COALESCE(winner,''), status, COALESCE(court,''), ref_id,
+pool_no, COALESCE(round_name,''), is_bye,
+next_match_id, COALESCE(next_slot,''), source_match1_id, source_match2_id, locked,
+created_at::text, updated_at::text`
+
 func (s *Service) ListFixtures(ctx context.Context, tournamentID int64) ([]Fixture, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-SELECT id, tournament_id, COALESCE(category,''), COALESCE(gender,''),
-       round_no, match_no, team1, team2, score1, score2,
-       COALESCE(winner,''), status, COALESCE(court,''), ref_id,
-       created_at::text, updated_at::text
+SELECT `+fixtureSelectCols+`
 FROM tournament_fixtures WHERE tournament_id=$1
 ORDER BY round_no, match_no, id`, tournamentID)
 	if err != nil {
@@ -201,49 +214,9 @@ ORDER BY round_no, match_no, id`, tournamentID)
 	return out, rows.Err()
 }
 
+// GenerateFixtures is kept for callers without body; prefers GenerateFixturesEx.
 func (s *Service) GenerateFixtures(ctx context.Context, tournamentID int64) ([]Fixture, error) {
-	existing, err := s.ListFixtures(ctx, tournamentID)
-	if err != nil {
-		return nil, err
-	}
-	if len(existing) > 0 {
-		return existing, nil
-	}
-	entries, err := s.ListEntries(ctx, tournamentID)
-	if err != nil {
-		return nil, err
-	}
-	// Group by category|gender
-	groups := map[string][]Entry{}
-	for _, e := range entries {
-		if strings.ToLower(e.Status) != "active" && e.Status != "" {
-			continue
-		}
-		key := e.Category + "|" + e.Gender
-		groups[key] = append(groups[key], e)
-	}
-	matchNo := 0
-	for key, list := range groups {
-		parts := strings.SplitN(key, "|", 2)
-		cat, gen := parts[0], ""
-		if len(parts) > 1 {
-			gen = parts[1]
-		}
-		for i := 0; i < len(list); i++ {
-			for j := i + 1; j < len(list); j++ {
-				matchNo++
-				_, err := s.DB.ExecContext(ctx, `
-INSERT INTO tournament_fixtures
-  (tournament_id, category, gender, round_no, match_no, team1, team2, status)
-VALUES ($1,$2,$3,1,$4,$5,$6,'scheduled')`,
-					tournamentID, cat, gen, matchNo, list[i].PlayerName, list[j].PlayerName)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-	return s.ListFixtures(ctx, tournamentID)
+	return s.GenerateFixturesEx(ctx, tournamentID, GenerateFixturesInput{})
 }
 
 func (s *Service) GetFixture(ctx context.Context, id int64) (*Fixture, error) {
@@ -252,10 +225,7 @@ func (s *Service) GetFixture(ctx context.Context, id int64) (*Fixture, error) {
 
 func (s *Service) getFixture(ctx context.Context, id int64) (*Fixture, error) {
 	row := s.DB.QueryRowContext(ctx, `
-SELECT id, tournament_id, COALESCE(category,''), COALESCE(gender,''),
-       round_no, match_no, team1, team2, score1, score2,
-       COALESCE(winner,''), status, COALESCE(court,''), ref_id,
-       created_at::text, updated_at::text
+SELECT `+fixtureSelectCols+`
 FROM tournament_fixtures WHERE id=$1`, id)
 	return scanFixture(row)
 }
@@ -296,17 +266,28 @@ VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''))`,
 	if err != nil {
 		return nil, err
 	}
+	updated, err := s.getFixture(ctx, fixtureID)
+	if err != nil {
+		return nil, err
+	}
+	if isCompletedFixtureStatus(updated.Status) && strings.TrimSpace(updated.Winner) != "" {
+		_ = s.advanceWinner(ctx, updated)
+	}
 	return s.getFixture(ctx, fixtureID)
 }
 
 func scanFixture(row scannable) (*Fixture, error) {
 	var f Fixture
 	var s1, s2 sql.NullInt64
-	var refID sql.NullInt64
+	var refID, nextID, src1, src2 sql.NullInt64
+	var pool sql.NullInt64
 	err := row.Scan(
 		&f.ID, &f.TournamentID, &f.Category, &f.Gender,
 		&f.RoundNo, &f.MatchNo, &f.Team1, &f.Team2, &s1, &s2,
-		&f.Winner, &f.Status, &f.Court, &refID, &f.CreatedAt, &f.UpdatedAt,
+		&f.Winner, &f.Status, &f.Court, &refID,
+		&pool, &f.RoundName, &f.IsBye,
+		&nextID, &f.NextSlot, &src1, &src2, &f.Locked,
+		&f.CreatedAt, &f.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -323,7 +304,32 @@ func scanFixture(row scannable) (*Fixture, error) {
 		v := refID.Int64
 		f.RefID = &v
 	}
+	if pool.Valid {
+		v := int(pool.Int64)
+		f.PoolNo = &v
+	}
+	if nextID.Valid {
+		v := nextID.Int64
+		f.NextMatchID = &v
+	}
+	if src1.Valid {
+		v := src1.Int64
+		f.SourceMatch1 = &v
+	}
+	if src2.Valid {
+		v := src2.Int64
+		f.SourceMatch2 = &v
+	}
 	return &f, nil
+}
+
+func isCompletedFixtureStatus(st string) bool {
+	switch strings.ToLower(strings.TrimSpace(st)) {
+	case "completed", "finished", "done", "bye":
+		return true
+	default:
+		return false
+	}
 }
 
 // --- Score live ---

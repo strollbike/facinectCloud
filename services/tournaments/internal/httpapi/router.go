@@ -55,6 +55,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Advanced
 	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/fixtures/knockout", s.withAuth(s.handleGenerateKnockout))
+	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/fixtures/next-round", s.withAuth(s.handleGenerateNextRound))
 	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/fixtures/preview", s.withAuth(s.handleFixturePreview))
 	mux.HandleFunc("POST /v1/tournaments/fixtures/{fixtureId}/walkover", s.withAuth(s.handleWalkover))
 	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/fixtures/reset", s.withAuth(s.handleResetFixtures))
@@ -404,12 +405,18 @@ func (s *Server) handleGenerateFixtures(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		return
 	}
-	list, err := s.Tournaments.GenerateFixtures(r.Context(), cur.ID)
+	var in tournaments.GenerateFixturesInput
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
+	list, err := s.Tournaments.GenerateFixturesEx(r.Context(), cur.ID, in)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		code := http.StatusBadRequest
+		if err.Error() == "bracket_locked" {
+			code = http.StatusLocked
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"fixtures": list})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "fixtures": list})
 }
 
 func (s *Server) handleFixtureScore(w http.ResponseWriter, r *http.Request, ac *authCtx) {
@@ -600,10 +607,29 @@ func (s *Server) handleGenerateKnockout(w http.ResponseWriter, r *http.Request, 
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
 	list, err := s.Tournaments.GenerateKnockout(r.Context(), cur.ID, in)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		code := http.StatusBadRequest
+		if err.Error() == "bracket_locked" {
+			code = http.StatusLocked
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"fixtures": list})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "fixtures": list})
+}
+
+func (s *Server) handleGenerateNextRound(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	cur, ok := s.tournamentFacility(w, r, ac)
+	if !ok {
+		return
+	}
+	var in tournaments.KnockoutInput
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
+	list, err := s.Tournaments.GenerateNextRound(r.Context(), cur.ID, in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "fixtures": list})
 }
 
 func (s *Server) handleFixturePreview(w http.ResponseWriter, r *http.Request, ac *authCtx) {
@@ -662,7 +688,11 @@ func (s *Server) handleResetFixtures(w http.ResponseWriter, r *http.Request, ac 
 	var in tournaments.ResetFixturesInput
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
 	if err := s.Tournaments.ResetFixtures(r.Context(), cur.ID, in); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		code := http.StatusBadRequest
+		if err.Error() == "bracket_locked" {
+			code = http.StatusLocked
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error(), "requires_force": err.Error() == "bracket_locked"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
