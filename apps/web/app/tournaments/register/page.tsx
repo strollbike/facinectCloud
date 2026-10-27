@@ -168,6 +168,185 @@ function isPhoneField(name: string) {
   );
 }
 
+function isClubAcademyField(name: string) {
+  const flink = name.toLowerCase();
+  return flink.includes('club') || flink.includes('academy');
+}
+
+function pad2(n: number) {
+  return String(n).padStart(2, '0');
+}
+
+function daysInMonth(year: number, month: number) {
+  return new Date(year, month, 0).getDate();
+}
+
+function parseIsoDob(iso: string | undefined) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((iso || '').trim());
+  if (!m) return { y: 0, mo: 0, d: 0 };
+  return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]) };
+}
+
+function toIsoDob(y: number, mo: number, d: number) {
+  if (!y || !mo || !d) return '';
+  return `${y}-${pad2(mo)}-${pad2(d)}`;
+}
+
+function formatDobDisplay(iso: string) {
+  const { y, mo, d } = parseIsoDob(iso);
+  if (!y || !mo || !d) return '';
+  return `${pad2(d)}/${pad2(mo)}/${y}`;
+}
+
+function defaultDobYear(minYear: number | null) {
+  const now = new Date();
+  let y = now.getFullYear() - 18;
+  const first = minYear && minYear > 1900 ? minYear : 1900;
+  if (y < first) y = first;
+  if (y > now.getFullYear()) y = now.getFullYear();
+  return y;
+}
+
+/** Year → Month → Day DOB (1900/minYear → today). Stores yyyy-MM-dd; shows DD/MM/YYYY. */
+function DobField({
+  value,
+  minYear,
+  error,
+  onChange,
+}: {
+  value: string;
+  minYear: number | null;
+  error?: boolean;
+  onChange: (iso: string) => void;
+}) {
+  const now = new Date();
+  const maxY = now.getFullYear();
+  const maxMo = now.getMonth() + 1;
+  const maxD = now.getDate();
+  const firstY = minYear && minYear > 1900 ? minYear : 1900;
+
+  const parsed = parseIsoDob(value);
+  const year = parsed.y || 0;
+  const month = parsed.mo || 0;
+  const day = parsed.d || 0;
+
+  const years: number[] = [];
+  for (let y = maxY; y >= firstY; y--) years.push(y);
+
+  const months: number[] = [];
+  if (year) {
+    const lastMo = year === maxY ? maxMo : 12;
+    for (let m = 1; m <= lastMo; m++) months.push(m);
+  }
+
+  const days: number[] = [];
+  if (year && month) {
+    let lastD = daysInMonth(year, month);
+    if (year === maxY && month === maxMo) lastD = Math.min(lastD, maxD);
+    for (let d = 1; d <= lastD; d++) days.push(d);
+  }
+
+  function commit(y: number, mo: number, d: number) {
+    if (!y) {
+      onChange('');
+      return;
+    }
+    if (!mo) {
+      onChange('');
+      return;
+    }
+    let useD = d;
+    const maxForMonth = daysInMonth(y, mo);
+    let lastAllowed = maxForMonth;
+    if (y === maxY && mo === maxMo) lastAllowed = Math.min(maxForMonth, maxD);
+    if (!useD) {
+      onChange('');
+      return;
+    }
+    if (useD > lastAllowed) useD = lastAllowed;
+    // Reject future (guard)
+    const cand = new Date(y, mo - 1, useD);
+    const today = new Date(maxY, maxMo - 1, maxD);
+    if (cand > today) {
+      onChange(toIsoDob(maxY, maxMo, maxD));
+      return;
+    }
+    onChange(toIsoDob(y, mo, useD));
+  }
+
+  return (
+    <div className={styles.dobWrap}>
+      <div className={styles.dobRow}>
+        <select
+          className={`${styles.select} ${error ? styles.fieldError : ''}`}
+          aria-label="Birth year"
+          value={year || ''}
+          onChange={(e) => {
+            const y = Number(e.target.value) || 0;
+            if (!y) {
+              onChange('');
+              return;
+            }
+            const mo = month && (y < maxY || month <= maxMo) ? month : 0;
+            const d = mo && day ? day : 0;
+            commit(y, mo, d);
+          }}
+        >
+          <option value="">Year</option>
+          {years.map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))}
+        </select>
+        <select
+          className={`${styles.select} ${error ? styles.fieldError : ''}`}
+          aria-label="Birth month"
+          value={month || ''}
+          disabled={!year}
+          onChange={(e) => {
+            const mo = Number(e.target.value) || 0;
+            commit(year, mo, day);
+          }}
+        >
+          <option value="">Month</option>
+          {months.map((m) => (
+            <option key={m} value={m}>
+              {pad2(m)}
+            </option>
+          ))}
+        </select>
+        <select
+          className={`${styles.select} ${error ? styles.fieldError : ''}`}
+          aria-label="Birth day"
+          value={day || ''}
+          disabled={!year || !month}
+          onChange={(e) => {
+            const d = Number(e.target.value) || 0;
+            commit(year, month, d);
+          }}
+        >
+          <option value="">Day</option>
+          {days.map((d) => (
+            <option key={d} value={d}>
+              {pad2(d)}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className={styles.dobHint}>
+        {value ? (
+          <>
+            Selected: <b>{formatDobDisplay(value)}</b>
+          </>
+        ) : (
+          <>Select year first (default suggestion: {defaultDobYear(minYear)})</>
+        )}
+      </div>
+    </div>
+  );
+}
+
 type PlayerValues = Record<string, string>;
 
 function RegisterInner() {
@@ -852,16 +1031,57 @@ function RegisterInner() {
                               <label>
                                 {labelFor(fname)} {star}
                               </label>
-                              <input
-                                type="date"
-                                className={`${styles.field} ${err ? styles.fieldError : ''}`}
+                              <DobField
                                 value={p[fname] || ''}
-                                onChange={(e) => setPlayerField(i, fname, e.target.value)}
+                                minYear={catRules.minYear}
+                                error={err}
+                                onChange={(iso) => setPlayerField(i, fname, iso)}
                               />
                               {ageErrors[errKey] ? (
                                 <span className={styles.ageErrorMsg}>
                                   Year must be {catRules.minYear} or later.
                                 </span>
+                              ) : null}
+                            </div>
+                          );
+                        }
+
+                        if (isClubAcademyField(fname)) {
+                          return (
+                            <div key={fname} className={styles.fieldGroup}>
+                              <label>
+                                {labelFor(fname)} {star}
+                              </label>
+                              <input
+                                className={`${styles.field} ${err ? styles.fieldError : ''}`}
+                                placeholder={`Enter ${labelFor(fname)}`}
+                                value={p[fname] || ''}
+                                onChange={(e) => setPlayerField(i, fname, e.target.value)}
+                              />
+                              {i > 0 ? (
+                                <button
+                                  type="button"
+                                  className={styles.sameAsBtn}
+                                  onClick={() => {
+                                    const captain = players[0] || {};
+                                    let src = String(captain[fname] || '').trim();
+                                    if (!src) {
+                                      for (const [k, v] of Object.entries(captain)) {
+                                        if (isClubAcademyField(k) && String(v || '').trim()) {
+                                          src = String(v).trim();
+                                          break;
+                                        }
+                                      }
+                                    }
+                                    if (!src) {
+                                      alert('Captain club / academy is empty.');
+                                      return;
+                                    }
+                                    setPlayerField(i, fname, src);
+                                  }}
+                                >
+                                  Same as Captain
+                                </button>
                               ) : null}
                             </div>
                           );

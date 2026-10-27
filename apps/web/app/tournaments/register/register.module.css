@@ -511,3 +511,42 @@
   font-size: 13px;
   margin: 0;
 }
+
+.sameAsBtn {
+  margin-top: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--primary);
+  font-weight: 700;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sameAsBtn:hover {
+  text-decoration: underline;
+}
+
+.dobWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dobRow {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr 0.9fr;
+  gap: 8px;
+}
+
+.dobHint {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.dobHint b {
+  color: var(--primary);
+}
