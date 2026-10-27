@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -38,8 +39,14 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /v1/tournaments/tournaments/{tournamentId}/fixtures", s.withAuth(s.handleListFixtures))
 	mux.HandleFunc("GET /v1/tournaments/tournaments/{tournamentId}/standings", s.withAuth(s.handleStandings))
+	mux.HandleFunc("GET /v1/tournaments/tournaments/{tournamentId}/courts-board", s.withAuth(s.handleCourtsBoard))
+	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/courts-board", s.withAuth(s.handleCourtsBoardPost))
 	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/fixtures", s.withAuth(s.handleGenerateFixtures))
 	mux.HandleFunc("POST /v1/tournaments/fixtures/{fixtureId}/score", s.withAuth(s.handleFixtureScore))
+
+	mux.HandleFunc("POST /v1/tournaments/entries/{entryId}/checkout", s.withAuth(s.handleEntryCheckout))
+	mux.HandleFunc("POST /v1/tournaments/entries/{entryId}/confirm-payment", s.withAuth(s.handleEntryConfirmPayment))
+	mux.HandleFunc("POST /v1/tournaments/payments/gateway-paid", s.withAuth(s.handleGatewayPaid))
 
 	mux.HandleFunc("GET /v1/tournaments/tournaments/{tournamentId}/score-live", s.withAuth(s.handleScoreLive))
 
@@ -78,6 +85,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tournaments/ref/score", s.handleRefScore)
 	mux.HandleFunc("POST /v1/tournaments/ref/save", s.handleRefSave)
 	mux.HandleFunc("GET /v1/tournaments/ref/history", s.handleRefHistory)
+	mux.HandleFunc("POST /v1/tournaments/ref/login", s.handleRefLogin)
+	mux.HandleFunc("POST /v1/tournaments/ref/unlock", s.handleRefUnlock)
+	mux.HandleFunc("GET /v1/tournaments/ref/validate-assignment", s.handleRefValidateAssignment)
+
+	// Stage G — public live board / score bus (no JWT)
+	mux.HandleFunc("GET /v1/tournaments/public/live-arena", s.handlePublicLiveArena)
+	mux.HandleFunc("POST /v1/tournaments/public/live-arena", s.handlePublicLiveArena)
+	mux.HandleFunc("GET /v1/tournaments/public/score-live", s.handlePublicScoreLive)
+	mux.HandleFunc("POST /v1/tournaments/public/score-live", s.handlePublicScoreLive)
 
 	return s.withCORS(mux)
 }
@@ -419,6 +435,145 @@ func (s *Server) handleStandings(w http.ResponseWriter, r *http.Request, ac *aut
 	})
 }
 
+func (s *Server) handleCourtsBoard(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	cur, ok := s.tournamentFacility(w, r, ac)
+	if !ok {
+		return
+	}
+	cat := strings.TrimSpace(r.URL.Query().Get("category"))
+	gen := strings.TrimSpace(r.URL.Query().Get("gender"))
+	board, err := s.Tournaments.GetCourtsBoard(r.Context(), cur.ID, cat, gen)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":        true,
+		"tourId":         board.TourID,
+		"courts":         board.Courts,
+		"conflicts":      board.Conflicts,
+		"bracket_locked": board.BracketLocked,
+	})
+}
+
+func (s *Server) handleCourtsBoardPost(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	cur, ok := s.tournamentFacility(w, r, ac)
+	if !ok {
+		return
+	}
+	var body struct {
+		Category string `json:"category"`
+		Gender   string `json:"gender"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+	cat := strings.TrimSpace(body.Category)
+	if cat == "" {
+		cat = strings.TrimSpace(r.URL.Query().Get("category"))
+	}
+	gen := strings.TrimSpace(body.Gender)
+	if gen == "" {
+		gen = strings.TrimSpace(r.URL.Query().Get("gender"))
+	}
+	board, err := s.Tournaments.GetCourtsBoard(r.Context(), cur.ID, cat, gen)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":        true,
+		"tourId":         board.TourID,
+		"courts":         board.Courts,
+		"conflicts":      board.Conflicts,
+		"bracket_locked": board.BracketLocked,
+	})
+}
+
+func (s *Server) handleEntryCheckout(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	entryID, err := pathInt(r, "entryId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_entry_id"})
+		return
+	}
+	entry, err := s.Tournaments.GetEntry(r.Context(), entryID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	t, err := s.Tournaments.Get(r.Context(), entry.TournamentID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	if err := s.requireFacility(ac, t.FacilityID); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	var in tournaments.CheckoutInput
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
+	out, err := s.Tournaments.CreateEntryCheckout(r.Context(), entryID, in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "checkout": out})
+}
+
+func (s *Server) handleEntryConfirmPayment(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	entryID, err := pathInt(r, "entryId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_entry_id"})
+		return
+	}
+	entry, err := s.Tournaments.GetEntry(r.Context(), entryID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	t, err := s.Tournaments.Get(r.Context(), entry.TournamentID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	if err := s.requireFacility(ac, t.FacilityID); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	var in tournaments.ConfirmPaymentInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	row, err := s.Tournaments.ConfirmEntryPayment(r.Context(), entryID, in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "entry": row})
+}
+
+func (s *Server) handleGatewayPaid(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	// Service-key / internal fan-out only — never trust browser-only callers without auth.
+	if !ac.ViaKey && ac.Principal == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	var in tournaments.GatewayPaidEvent
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	row, err := s.Tournaments.ApplyGatewayPaidEvent(r.Context(), in)
+	if err != nil {
+		code := http.StatusBadRequest
+		if err.Error() == "not_found" {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "entry": row})
+}
+
 func (s *Server) handleGenerateFixtures(w http.ResponseWriter, r *http.Request, ac *authCtx) {
 	cur, ok := s.tournamentFacility(w, r, ac)
 	if !ok {
@@ -478,13 +633,24 @@ func (s *Server) handleScoreLive(w http.ResponseWriter, r *http.Request, ac *aut
 	}
 	category := strings.TrimSpace(r.URL.Query().Get("category"))
 	afterID, _ := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
+	if afterID == 0 {
+		afterID, _ = strconv.ParseInt(r.URL.Query().Get("afterId"), 10, 64)
+	}
 	waitSec, _ := strconv.Atoi(r.URL.Query().Get("wait"))
 	events, err := s.Tournaments.PollScoreEvents(r.Context(), cur.ID, category, afterID, waitSec)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"events": events})
+	next := afterID
+	for _, e := range events {
+		if e.ID > next {
+			next = e.ID
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "tourId": cur.ID, "events": events, "afterId": next,
+	})
 }
 
 func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request, ac *authCtx) {
@@ -575,12 +741,25 @@ func (s *Server) handleAssignCourt(w http.ResponseWriter, r *http.Request, ac *a
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
 		return
 	}
-	row, err := s.Tournaments.AssignRefereeCourt(r.Context(), cur.ID, in)
+	res, err := s.Tournaments.AssignRefereeCourtWithPIN(r.Context(), cur.ID, in)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, row)
+	out := map[string]interface{}{
+		"success": true, "access_code": res.AccessCode, "token": res.Token,
+		"expires_at": res.ExpiresAt, "url": res.URL, "whatsapp_sent": res.WhatsAppSent,
+	}
+	if res.Referee != nil {
+		out["id"] = res.Referee.ID
+		out["referee"] = res.Referee
+		out["tournament_id"] = res.Referee.TournamentID
+		out["category"] = res.Referee.Category
+		out["court"] = res.Referee.Court
+		out["email"] = res.Referee.Email
+		out["ref_id"] = res.Referee.RefID
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleUnassignCourt(w http.ResponseWriter, r *http.Request, ac *authCtx) {
@@ -903,11 +1082,14 @@ func (s *Server) handleValidateReferee(w http.ResponseWriter, r *http.Request, a
 		RefID string `json:"ref_id"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+	p, err := s.Tournaments.ValidateRefereeProfile(r.Context(), body.Email, body.RefID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "valid": false, "error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"valid":   true,
-		"email":   strings.TrimSpace(body.Email),
-		"ref_id":  strings.TrimSpace(body.RefID),
+		"success": true, "valid": true, "referee": p,
+		"email": p.Email, "ref_id": p.RefID, "referee_identity": p.RefereeIdentity,
 	})
 }
 
@@ -1007,6 +1189,192 @@ func (s *Server) handleRefHistory(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"events":  list,
 		"data":    map[string]interface{}{"events": list, "history": list},
+	})
+}
+
+func (s *Server) handlePublicLiveArena(w http.ResponseWriter, r *http.Request) {
+	action := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("action")))
+	if action == "" && r.Method == http.MethodPost {
+		var body map[string]interface{}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+		if v, ok := body["action"].(string); ok {
+			action = strings.ToLower(strings.TrimSpace(v))
+		}
+		if action == "board" {
+			if tid, ok := body["tourId"].(float64); ok {
+				r.URL.RawQuery = "action=board&tourId=" + strconv.FormatInt(int64(tid), 10)
+			}
+			if c, ok := body["category"].(string); ok {
+				q := r.URL.Query()
+				q.Set("category", c)
+				r.URL.RawQuery = q.Encode()
+			}
+		}
+	}
+	if action == "" {
+		action = "list"
+	}
+	switch action {
+	case "ping":
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "OK", "data": map[string]string{"file": "live-arena"}})
+	case "list":
+		list, err := s.Tournaments.ListPublicLiveTournaments(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true, "message": "OK",
+			"data": map[string]interface{}{"tournaments": list, "count": len(list)},
+		})
+	case "board":
+		tid, _ := strconv.ParseInt(r.URL.Query().Get("tourId"), 10, 64)
+		if tid == 0 {
+			tid, _ = strconv.ParseInt(r.URL.Query().Get("tournamentId"), 10, 64)
+		}
+		cat := strings.TrimSpace(r.URL.Query().Get("category"))
+		gen := strings.TrimSpace(r.URL.Query().Get("gender"))
+		board, err := s.Tournaments.GetPublicLiveBoard(r.Context(), tid, cat, gen)
+		if err != nil {
+			code := http.StatusBadRequest
+			if err.Error() == "not_found" || err.Error() == "not_public" {
+				code = http.StatusNotFound
+			}
+			writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "OK", "data": board})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "unknown_action"})
+	}
+}
+
+func (s *Server) handlePublicScoreLive(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if r.Method == http.MethodPost {
+		var body map[string]interface{}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+		for _, k := range []string{"tourId", "tournamentId", "after_id", "afterId", "category", "wait", "action"} {
+			if v, ok := body[k]; ok {
+				q.Set(k, fmt.Sprint(v))
+			}
+		}
+	}
+	action := strings.ToLower(strings.TrimSpace(q.Get("action")))
+	if action == "ping" || action == "ping_public" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "data": map[string]bool{"ok": true}})
+		return
+	}
+	tid, _ := strconv.ParseInt(q.Get("tourId"), 10, 64)
+	if tid == 0 {
+		tid, _ = strconv.ParseInt(q.Get("tournamentId"), 10, 64)
+	}
+	afterID, _ := strconv.ParseInt(q.Get("after_id"), 10, 64)
+	if afterID == 0 {
+		afterID, _ = strconv.ParseInt(q.Get("afterId"), 10, 64)
+	}
+	waitSec, _ := strconv.Atoi(q.Get("wait"))
+	if waitSec == 0 && (action == "wait" || action == "wait_public") {
+		waitSec = 20
+	}
+	out, err := s.Tournaments.PublicScoreLive(r.Context(), tid, afterID, strings.TrimSpace(q.Get("category")), waitSec)
+	if err != nil {
+		code := http.StatusBadRequest
+		if err.Error() == "not_found" || err.Error() == "not_public" {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "OK", "data": out, "events": out["events"], "afterId": out["afterId"], "tourId": tid})
+}
+
+func (s *Server) handleRefLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+		RefID string `json:"ref_id"`
+		RefId string `json:"refId"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "invalid_json"})
+		return
+	}
+	refRaw := strings.TrimSpace(body.RefID)
+	if refRaw == "" {
+		refRaw = strings.TrimSpace(body.RefId)
+	}
+	out, err := s.Tournaments.RefereeLogin(r.Context(), body.Email, refRaw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "message": "Referee login ok.",
+		"data": out, "referee": out.Referee, "owners": out.Owners, "scorecards": out.Scorecards,
+	})
+}
+
+func (s *Server) handleRefUnlock(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RefID          int64  `json:"ref_id"`
+		RefId          int64  `json:"refId"`
+		AssignmentID   int64  `json:"assignment_id"`
+		AssignmentId   int64  `json:"assignmentId"`
+		AccessCode     string `json:"access_code"`
+		AccessCodeAlt  string `json:"accessCode"`
+		Pin            string `json:"pin"`
+		Email          string `json:"email"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "invalid_json"})
+		return
+	}
+	refID := body.RefID
+	if refID == 0 {
+		refID = body.RefId
+	}
+	if refID == 0 && strings.TrimSpace(body.Email) != "" {
+		p, err := s.Tournaments.ValidateRefereeProfile(r.Context(), body.Email, "")
+		if err == nil {
+			refID = p.RefID
+		}
+	}
+	assignmentID := body.AssignmentID
+	if assignmentID == 0 {
+		assignmentID = body.AssignmentId
+	}
+	code := strings.TrimSpace(body.AccessCode)
+	if code == "" {
+		code = strings.TrimSpace(body.AccessCodeAlt)
+	}
+	if code == "" {
+		code = strings.TrimSpace(body.Pin)
+	}
+	card, err := s.Tournaments.UnlockRefereeScorecard(r.Context(), refID, assignmentID, code)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "Scorecard unlocked.", "data": card})
+}
+
+func (s *Server) handleRefValidateAssignment(w http.ResponseWriter, r *http.Request) {
+	refID, _ := strconv.ParseInt(r.URL.Query().Get("ref_id"), 10, 64)
+	if refID == 0 {
+		refID, _ = strconv.ParseInt(r.URL.Query().Get("refId"), 10, 64)
+	}
+	assignmentID, _ := strconv.ParseInt(r.URL.Query().Get("assignment_id"), 10, 64)
+	if assignmentID == 0 {
+		assignmentID, _ = strconv.ParseInt(r.URL.Query().Get("assignmentId"), 10, 64)
+	}
+	card, err := s.Tournaments.ValidateRefereeAssignment(r.Context(), refID, assignmentID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "valid": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "valid": true, "data": card,
+		"session_valid": true, "unlocked": card.Unlocked, "token": card.Token,
 	})
 }
 

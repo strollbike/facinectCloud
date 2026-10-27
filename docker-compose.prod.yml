@@ -336,12 +336,18 @@ services:
       JWT_ISSUER: ${JWT_ISSUER}
       JWT_AUDIENCE: ${JWT_AUDIENCE}
       CORS_ORIGINS: ${CORS_ORIGINS:-https://cloud.facinect.com}
+      NOTIFICATIONS_BASE_URL: http://notifications:8080
+      NOTIFICATIONS_SERVICE_KEY: ${NOTIFICATIONS_SERVICE_KEY:-}
+      PAYGATEWAY_URL: ${PAYGATEWAY_URL:-http://paygateway:8080}
+      PAYGATEWAY_SERVICE_KEY: ${PAYGATEWAY_SERVICE_KEY:-}
     volumes:
       - ./keys:/keys:ro
     depends_on:
       postgres:
         condition: service_healthy
       identity:
+        condition: service_healthy
+      paygateway:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/v1/tournaments/health | grep -q '\"status\":\"ok\"'"]

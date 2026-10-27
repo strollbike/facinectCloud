@@ -20,6 +20,8 @@ type Config struct {
 	JWTAudience      string
 	NotificationsURL string
 	NotificationsKey string
+	PaygatewayURL    string
+	PaygatewayKey    string
 }
 
 func FromEnv() Config {
@@ -38,6 +40,8 @@ func FromEnv() Config {
 		JWTAudience:      getenv("JWT_AUDIENCE", "facinect-apps"),
 		NotificationsURL: strings.TrimRight(getenv("NOTIFICATIONS_BASE_URL", "http://notifications:8080"), "/"),
 		NotificationsKey: strings.TrimSpace(os.Getenv("NOTIFICATIONS_SERVICE_KEY")),
+		PaygatewayURL:    strings.TrimRight(getenv("PAYGATEWAY_URL", "http://paygateway:8080"), "/"),
+		PaygatewayKey:    strings.TrimSpace(os.Getenv("PAYGATEWAY_SERVICE_KEY")),
 	}
 }
 
