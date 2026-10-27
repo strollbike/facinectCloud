@@ -1,0 +1,513 @@
+/* PHP register.php styles — keep visual parity; do not redesign */
+.page {
+  --primary: #4f46e5;
+  --bg: #f8fafc;
+  --border: #e2e8f0;
+  --success: #10b981;
+  --danger: #ef4444;
+  --accent: #f59e0b;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  background: var(--bg);
+  padding: 15px;
+  margin: 0;
+  color: #1e293b;
+  overflow-x: hidden;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.mainLayout {
+  max-width: 1200px;
+  margin: 20px auto;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 30px;
+  transition: 0.3s filter linear;
+}
+
+.blurEffect {
+  filter: blur(15px);
+  pointer-events: none;
+  user-select: none;
+}
+
+.container {
+  background: #fff;
+  padding: 30px;
+  border-radius: 24px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.05);
+}
+
+.sidebarRules {
+  background: #fff;
+  padding: 30px;
+  border-radius: 24px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.05);
+  height: fit-content;
+  position: sticky;
+  top: 20px;
+  border: 1px solid var(--border);
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .mainLayout {
+    grid-template-columns: 1fr 400px;
+  }
+  .sidebarRules {
+    display: block;
+  }
+}
+
+.rulesContentText {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #475569;
+  white-space: pre-line;
+  max-height: 50vh;
+  overflow-y: auto;
+  padding-right: 10px;
+  margin-bottom: 20px;
+}
+
+.modalOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(15, 23, 42, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.modalOverlayDark {
+  background: rgba(15, 23, 42, 0.8);
+}
+
+.templateModalCard {
+  background: none;
+  width: auto;
+  max-width: 90%;
+  position: relative;
+  animation: zoomIn 0.3s ease-out;
+}
+
+@keyframes zoomIn {
+  from {
+    transform: scale(0.95);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.closeTemplate {
+  position: absolute;
+  top: -45px;
+  right: -10px;
+  background: #fff;
+  color: #000;
+  width: 35px;
+  height: 35px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 20px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  border: none;
+  z-index: 2001;
+}
+
+.templateImg {
+  width: 100%;
+  max-height: 80vh;
+  border-radius: 16px;
+  object-fit: contain;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.sidebarTemplateImg {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  margin-top: 15px;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.headerSection {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.headerSection h1 {
+  color: var(--primary);
+  margin: 0;
+  font-size: 26px;
+  font-weight: 800;
+}
+
+.sectionLabel {
+  font-weight: 800;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #64748b;
+  letter-spacing: 0.05em;
+  display: block;
+  margin-bottom: 10px;
+}
+
+.field,
+.select {
+  width: 100%;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1.5px solid var(--border);
+  font-size: 14px;
+  box-sizing: border-box;
+  transition: 0.3s;
+  background: #fcfcfd;
+  font-family: inherit;
+}
+
+.field:focus,
+.select:focus {
+  border-color: var(--primary);
+  outline: none;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.1);
+}
+
+.fieldError {
+  border-color: var(--danger) !important;
+  background: #fff1f1 !important;
+}
+
+.playerCard {
+  border: 1.5px solid var(--border);
+  border-radius: 20px;
+  margin-bottom: 15px;
+  overflow: hidden;
+  display: none;
+}
+
+.playerCardActive {
+  display: block;
+  border-color: var(--primary);
+}
+
+.playerHeader {
+  background: #f8fafc;
+  padding: 15px 25px;
+  font-weight: 800;
+  border-bottom: 1.5px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 15px;
+  padding: 25px;
+}
+
+@media (max-width: 600px) {
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.fieldGroup span2 {
+  grid-column: span 2;
+}
+
+.span2 {
+  grid-column: span 2;
+}
+
+.fieldGroup label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.btnRow {
+  display: flex;
+  gap: 10px;
+  padding: 0 25px 25px;
+}
+
+.btn {
+  flex: 1;
+  padding: 15px;
+  border-radius: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  border: none;
+  font-size: 14px;
+  transition: 0.2s;
+  font-family: inherit;
+}
+
+.btnNext {
+  background: var(--primary);
+  color: white;
+}
+
+.btnBack {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.btnSubmit {
+  background: var(--success);
+  color: white;
+  width: 100%;
+  margin-top: 20px;
+}
+
+.btnSubmit:disabled {
+  background: #cbd5e1;
+  cursor: not-allowed;
+  opacity: 0.8;
+}
+
+.paymentBox {
+  margin-top: 20px;
+  padding: 16px;
+  border: 1.5px solid var(--border);
+  border-radius: 16px;
+  background: #f8fafc;
+}
+
+.paymentOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  border: 1.5px solid var(--border);
+  background: #fff;
+}
+
+.paymentOptionChecked {
+  border-color: var(--primary);
+  background: #eef2ff;
+}
+
+.paymentOption input {
+  width: auto;
+  margin-top: 3px;
+}
+
+.paymentOption label {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+}
+
+.paymentOption label b {
+  color: var(--primary);
+}
+
+.waBox {
+  position: relative;
+}
+
+.waIcon {
+  color: #25d366;
+  position: absolute;
+  right: 15px;
+  top: 14px;
+  font-size: 18px;
+}
+
+.summaryBox {
+  background: #f1f5f9;
+  padding: 20px;
+  border-radius: 16px;
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+}
+
+.termsContainer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 18px;
+  margin-top: 25px;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.termsContainer:hover {
+  border-color: var(--primary);
+  background: #f1f5f9;
+}
+
+.termsContainer input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  accent-color: var(--primary);
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.termsContainer label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.termsContainer label a {
+  color: var(--primary);
+  text-decoration: none;
+  margin-left: 4px;
+  font-weight: 700;
+  border-bottom: 1.5px solid rgba(79, 70, 229, 0.2);
+  transition: 0.2s;
+}
+
+.termsContainer label a:hover {
+  border-bottom-color: var(--primary);
+}
+
+.rulesModalCard {
+  background: white;
+  border-radius: 24px;
+  width: 90%;
+  max-width: 600px;
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+  overflow: hidden;
+}
+
+.rulesModalBody {
+  flex: 1;
+  background: #f8fafc;
+  overflow-y: auto;
+  padding: 25px;
+  text-align: left;
+  line-height: 1.6;
+}
+
+.rulesModalFooter {
+  padding: 20px;
+  border-top: 1px solid var(--border);
+  background: #fff;
+}
+
+.dateBadge {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary);
+  background: #eef2ff;
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1px solid #c7d2fe;
+}
+
+.ageErrorMsg {
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 5px;
+}
+
+.req {
+  color: var(--danger);
+}
+
+.successBanner {
+  background: #ecfdf5;
+  border: 1.5px solid #a7f3d0;
+  border-radius: 20px;
+  padding: 22px 20px;
+  margin-bottom: 18px;
+  text-align: center;
+}
+
+.successBanner h1 {
+  color: #065f46;
+  font-size: 22px;
+  margin: 0 0 8px;
+}
+
+.successBanner p {
+  margin: 0;
+  color: #047857;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.disabledCard {
+  background: white;
+  padding: 40px;
+  border-radius: 28px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.05);
+  text-align: center;
+  max-width: 420px;
+  width: 90%;
+  border: 1.5px solid #e2e8f0;
+  margin: 15vh auto;
+}
+
+.disabledCard h1 {
+  color: #0f172a;
+  font-size: 24px;
+  margin: 0 0 12px;
+  font-weight: 800;
+}
+
+.disabledCard p {
+  color: #64748b;
+  font-size: 15px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.muted {
+  color: #64748b;
+  margin-top: 10px;
+}
+
+.nameRow {
+  display: flex;
+  gap: 10px;
+}
+
+.payWarn {
+  color: #ef4444;
+  font-size: 13px;
+  margin: 0;
+}

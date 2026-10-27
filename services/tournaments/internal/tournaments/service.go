@@ -35,6 +35,8 @@ type Tournament struct {
 	AllowAdvancePayment  bool                   `json:"allow_advance_payment"`
 	AllowSpotPayment     bool                   `json:"allow_spot_payment"`
 	AdvanceAmount        float64                `json:"advance_amount"`
+	// EntriesOpen is 1/0 to match PHP + StrollX int.tryParse.
+	EntriesOpen          int                    `json:"entries_open"`
 	Categories           []Category             `json:"categories,omitempty"`
 	PaymentOptions       map[string]interface{} `json:"payment_options,omitempty"`
 	CreatedAt            string                 `json:"created_at,omitempty"`
@@ -74,6 +76,7 @@ SELECT id, facility_id, sport_id, name,
        COALESCE(contact_numbers,''), COALESCE(rules,''), COALESCE(group_url,''), COALESCE(slug,''),
        status,
        allow_full_payment, allow_advance_payment, allow_spot_payment, advance_amount::float8,
+       CASE WHEN entries_open THEN 1 ELSE 0 END,
        created_at::text, updated_at::text
 FROM tournaments WHERE facility_id=$1`
 	args := []interface{}{facilityID}
@@ -116,6 +119,7 @@ SELECT id, facility_id, sport_id, name,
        COALESCE(contact_numbers,''), COALESCE(rules,''), COALESCE(group_url,''), COALESCE(slug,''),
        status,
        allow_full_payment, allow_advance_payment, allow_spot_payment, advance_amount::float8,
+       CASE WHEN entries_open THEN 1 ELSE 0 END,
        created_at::text, updated_at::text
 FROM tournaments WHERE id=$1`, id)
 	t, err := scanTournament(row)
@@ -137,6 +141,7 @@ SELECT id, facility_id, sport_id, name,
        COALESCE(contact_numbers,''), COALESCE(rules,''), COALESCE(group_url,''), COALESCE(slug,''),
        status,
        allow_full_payment, allow_advance_payment, allow_spot_payment, advance_amount::float8,
+       CASE WHEN entries_open THEN 1 ELSE 0 END,
        created_at::text, updated_at::text
 FROM tournaments WHERE id=$1`, id)
 	return scanTournament(row)
@@ -329,6 +334,7 @@ func scanTournament(row scannable) (*Tournament, error) {
 		&t.StartDate, &t.EndDate, &t.VenueAddress, &t.LocationURL,
 		&t.ContactNumbers, &t.Rules, &t.GroupURL, &t.Slug, &t.Status,
 		&t.AllowFullPayment, &t.AllowAdvancePayment, &t.AllowSpotPayment, &t.AdvanceAmount,
+		&t.EntriesOpen,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {

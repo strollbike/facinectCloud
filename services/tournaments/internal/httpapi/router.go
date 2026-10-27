@@ -35,6 +35,9 @@ func (s *Server) Handler() http.Handler {
 	// Phase-2
 	mux.HandleFunc("GET /v1/tournaments/tournaments/{tournamentId}/entries", s.withAuth(s.handleListEntries))
 	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/entries", s.withAuth(s.handleCreateEntry))
+	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/entries/toggle", s.withAuth(s.handleToggleEntries))
+	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/entries/move-category", s.withAuth(s.handleMoveEntryCategory))
+	mux.HandleFunc("POST /v1/tournaments/tournaments/{tournamentId}/entries/spot-register", s.withAuth(s.handleSpotRegister))
 	mux.HandleFunc("POST /v1/tournaments/entries/{entryId}/payment", s.withAuth(s.handleEntryPayment))
 
 	mux.HandleFunc("GET /v1/tournaments/tournaments/{tournamentId}/fixtures", s.withAuth(s.handleListFixtures))
@@ -94,6 +97,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tournaments/public/live-arena", s.handlePublicLiveArena)
 	mux.HandleFunc("GET /v1/tournaments/public/score-live", s.handlePublicScoreLive)
 	mux.HandleFunc("POST /v1/tournaments/public/score-live", s.handlePublicScoreLive)
+
+	// Public registration (no JWT) — PHP register.php parity
+	mux.HandleFunc("GET /v1/tournaments/public/tournaments/{tournamentId}", s.handlePublicGet)
+	mux.HandleFunc("GET /v1/tournaments/public/tournaments/{tournamentId}/form-fields", s.handlePublicFormFields)
+	mux.HandleFunc("GET /v1/tournaments/public/tournaments/{tournamentId}/template", s.handlePublicTemplate)
+	mux.HandleFunc("POST /v1/tournaments/public/tournaments/{tournamentId}/register", s.handlePublicRegister)
+	mux.HandleFunc("POST /v1/tournaments/public/entries/{entryId}/confirm-payment", s.handlePublicConfirmPayment)
+	mux.HandleFunc("GET /v1/tournaments/public/by-slug/{slug}", s.handlePublicBySlug)
 
 	return s.withCORS(mux)
 }
@@ -1376,6 +1387,319 @@ func (s *Server) handleRefValidateAssignment(w http.ResponseWriter, r *http.Requ
 		"success": true, "valid": true, "data": card,
 		"session_valid": true, "unlocked": card.Unlocked, "token": card.Token,
 	})
+}
+
+func (s *Server) handleToggleEntries(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	cur, ok := s.tournamentFacility(w, r, ac)
+	if !ok {
+		return
+	}
+	state, err := s.Tournaments.ToggleEntries(r.Context(), cur.ID)
+	if err != nil {
+		code := http.StatusBadRequest
+		if err.Error() == "not_found" {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	msg := "Entries closed."
+	if state == 1 {
+		msg = "Entries opened."
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "message": msg, "tourId": cur.ID, "newState": state, "entries_open": state,
+	})
+}
+
+func (s *Server) handleMoveEntryCategory(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	cur, ok := s.tournamentFacility(w, r, ac)
+	if !ok {
+		return
+	}
+	var body struct {
+		RegID       int64  `json:"reg_id"`
+		EntryID     int64  `json:"entry_id"`
+		NewCategory string `json:"new_category"`
+		Category    string `json:"category"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	entryID := body.EntryID
+	if entryID <= 0 {
+		entryID = body.RegID
+	}
+	cat := strings.TrimSpace(body.NewCategory)
+	if cat == "" {
+		cat = strings.TrimSpace(body.Category)
+	}
+	row, err := s.Tournaments.MoveEntryCategory(r.Context(), cur.ID, entryID, cat)
+	if err != nil {
+		code := http.StatusBadRequest
+		if err.Error() == "not_found" {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "message": "Category updated.", "reg_id": row.ID, "entry_id": row.ID,
+		"new_category": row.Category, "entry": row,
+	})
+}
+
+func (s *Server) handleSpotRegister(w http.ResponseWriter, r *http.Request, ac *authCtx) {
+	cur, ok := s.tournamentFacility(w, r, ac)
+	if !ok {
+		return
+	}
+	var raw map[string]interface{}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&raw); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	cat := strings.TrimSpace(fmt.Sprint(raw["category_name"]))
+	if cat == "" || cat == "<nil>" {
+		cat = strings.TrimSpace(fmt.Sprint(raw["category"]))
+	}
+	if cat == "<nil>" {
+		cat = ""
+	}
+	in := tournaments.SpotRegisterInput{CategoryName: cat}
+	if players, ok := raw["players"].([]interface{}); ok {
+		for _, p := range players {
+			if m, ok := p.(map[string]interface{}); ok {
+				in.Players = append(in.Players, tournaments.SpotPlayerFromMap(m))
+			}
+		}
+	}
+	row, err := s.Tournaments.SpotRegister(r.Context(), cur.ID, in)
+	if err != nil {
+		code := http.StatusBadRequest
+		switch err.Error() {
+		case "not_found":
+			code = http.StatusNotFound
+		case "registration_closed":
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "message": "Spot registration saved.", "data": row, "reg_id": row.RegID, "entry_id": row.EntryID,
+	})
+}
+
+func (s *Server) handlePublicGet(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt(r, "tournamentId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_tournament_id"})
+		return
+	}
+	row, err := s.Tournaments.GetPublic(r.Context(), id)
+	if err != nil {
+		code := http.StatusNotFound
+		if err.Error() == "registration_closed" {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "tournament": row, "data": row})
+}
+
+func (s *Server) handlePublicBySlug(w http.ResponseWriter, r *http.Request) {
+	slug := strings.TrimSpace(r.PathValue("slug"))
+	facilityID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("facility_id")), 10, 64)
+	row, err := s.Tournaments.GetPublicBySlug(r.Context(), slug, facilityID)
+	if err != nil {
+		code := http.StatusNotFound
+		if err.Error() == "registration_closed" {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "tournament": row, "data": row})
+}
+
+func (s *Server) handlePublicFormFields(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt(r, "tournamentId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_tournament_id"})
+		return
+	}
+	if _, err := s.Tournaments.GetPublic(r.Context(), id); err != nil {
+		code := http.StatusNotFound
+		if err.Error() == "registration_closed" {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	fields, err := s.Tournaments.GetFormFields(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	if fields == nil || len(fields) == 0 {
+		fields = tournaments.DefaultFormCatalog()
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "fields": fields})
+}
+
+func (s *Server) handlePublicTemplate(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt(r, "tournamentId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_tournament_id"})
+		return
+	}
+	if _, err := s.Tournaments.GetPublic(r.Context(), id); err != nil {
+		code := http.StatusNotFound
+		if err.Error() == "registration_closed" {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	tpl, err := s.Tournaments.GetTemplate(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "template": tpl})
+}
+
+func (s *Server) handlePublicRegister(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt(r, "tournamentId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_tournament_id"})
+		return
+	}
+	var raw map[string]interface{}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&raw); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	in := tournaments.EntryInput{
+		Category:   strAny(raw["category"]),
+		Gender:     strAny(raw["gender"]),
+		PlayerName: strAny(raw["player_name"]),
+		Phone:      strAny(raw["phone"]),
+		Email:      strAny(raw["email"]),
+	}
+	if in.PlayerName == "" {
+		fn := strAny(raw["first_name"])
+		ln := strAny(raw["last_name"])
+		in.PlayerName = strings.TrimSpace(fn + " " + ln)
+	}
+	if in.Phone == "" {
+		in.Phone = strAny(raw["whatsapp_number"])
+	}
+	if in.Phone == "" {
+		in.Phone = strAny(raw["whatsapp"])
+	}
+	// Prefer captain from players[] when present (PHP accordion).
+	if players, ok := raw["players"].([]interface{}); ok && len(players) > 0 {
+		if m, ok := players[0].(map[string]interface{}); ok {
+			sp := tournaments.SpotPlayerFromMap(m)
+			if in.PlayerName == "" {
+				in.PlayerName = strings.TrimSpace(strings.TrimSpace(sp.FirstName) + " " + strings.TrimSpace(sp.LastName))
+				if in.PlayerName == "" {
+					in.PlayerName = sp.PlayerName
+				}
+			}
+			if in.Phone == "" {
+				in.Phone = sp.Phone
+				if in.Phone == "" {
+					in.Phone = sp.WhatsAppNumber
+				}
+			}
+			if in.Gender == "" {
+				in.Gender = sp.Gender
+			}
+			if in.Email == "" {
+				in.Email = sp.Email
+			}
+		}
+	}
+	row, err := s.Tournaments.CreatePublicEntry(r.Context(), id, in)
+	if err != nil {
+		code := http.StatusBadRequest
+		switch err.Error() {
+		case "registration_closed":
+			code = http.StatusConflict
+		case "not_found", "invalid_tournament":
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	mode := strAny(raw["payment_mode"])
+	if mode == "" {
+		mode = "full"
+	}
+	checkout, cerr := s.Tournaments.CreateEntryCheckout(r.Context(), row.ID, tournaments.CheckoutInput{PaymentMode: mode})
+	if cerr != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true, "entry": row, "data": row, "message": "Registration saved",
+			"checkout_error": cerr.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "entry": checkout.Entry, "data": checkout.Entry, "checkout": checkout,
+		"message": "Registration successful",
+	})
+}
+
+func (s *Server) handlePublicConfirmPayment(w http.ResponseWriter, r *http.Request) {
+	entryID, err := pathInt(r, "entryId")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_entry_id"})
+		return
+	}
+	entry, err := s.Tournaments.GetEntry(r.Context(), entryID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	if _, err := s.Tournaments.GetPublic(r.Context(), entry.TournamentID); err != nil {
+		// Allow confirm even if entries just closed after register started, as long as tournament exists.
+		if _, gerr := s.Tournaments.Get(r.Context(), entry.TournamentID); gerr != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+	}
+	var in tournaments.ConfirmPaymentInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+		return
+	}
+	row, err := s.Tournaments.ConfirmEntryPayment(r.Context(), entryID, in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "entry": row})
+}
+
+func strAny(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case float64:
+		return strconv.FormatInt(int64(t), 10)
+	case json.Number:
+		return strings.TrimSpace(t.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(t))
+	}
 }
 
 func pathInt(r *http.Request, name string) (int64, error) {
