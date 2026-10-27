@@ -225,10 +225,21 @@ function DobField({
   const maxD = now.getDate();
   const firstY = minYear && minYear > 1900 ? minYear : 1900;
 
+  // Draft parts so Year/Month stick before Day is chosen (parent value is only set when complete).
   const parsed = parseIsoDob(value);
-  const year = parsed.y || 0;
-  const month = parsed.mo || 0;
-  const day = parsed.d || 0;
+  const [year, setYear] = useState(parsed.y || 0);
+  const [month, setMonth] = useState(parsed.mo || 0);
+  const [day, setDay] = useState(parsed.d || 0);
+
+  // Sync from parent only when a complete ISO date is provided (do not wipe draft on '').
+  useEffect(() => {
+    const p = parseIsoDob(value);
+    if (p.y && p.mo && p.d) {
+      setYear(p.y);
+      setMonth(p.mo);
+      setDay(p.d);
+    }
+  }, [value]);
 
   const years: number[] = [];
   for (let y = maxY; y >= firstY; y--) years.push(y);
@@ -246,12 +257,8 @@ function DobField({
     for (let d = 1; d <= lastD; d++) days.push(d);
   }
 
-  function commit(y: number, mo: number, d: number) {
-    if (!y) {
-      onChange('');
-      return;
-    }
-    if (!mo) {
+  function publish(y: number, mo: number, d: number) {
+    if (!y || !mo || !d) {
       onChange('');
       return;
     }
@@ -259,18 +266,17 @@ function DobField({
     const maxForMonth = daysInMonth(y, mo);
     let lastAllowed = maxForMonth;
     if (y === maxY && mo === maxMo) lastAllowed = Math.min(maxForMonth, maxD);
-    if (!useD) {
-      onChange('');
-      return;
-    }
     if (useD > lastAllowed) useD = lastAllowed;
-    // Reject future (guard)
     const cand = new Date(y, mo - 1, useD);
     const today = new Date(maxY, maxMo - 1, maxD);
     if (cand > today) {
+      setYear(maxY);
+      setMonth(maxMo);
+      setDay(maxD);
       onChange(toIsoDob(maxY, maxMo, maxD));
       return;
     }
+    if (useD !== d) setDay(useD);
     onChange(toIsoDob(y, mo, useD));
   }
 
@@ -283,13 +289,31 @@ function DobField({
           value={year || ''}
           onChange={(e) => {
             const y = Number(e.target.value) || 0;
+            setYear(y);
+            let mo = month;
+            let d = day;
             if (!y) {
+              setMonth(0);
+              setDay(0);
               onChange('');
               return;
             }
-            const mo = month && (y < maxY || month <= maxMo) ? month : 0;
-            const d = mo && day ? day : 0;
-            commit(y, mo, d);
+            if (y === maxY && mo > maxMo) {
+              mo = 0;
+              d = 0;
+              setMonth(0);
+              setDay(0);
+            } else if (mo && d) {
+              const lastD = daysInMonth(y, mo);
+              if (d > lastD) {
+                d = lastD;
+                setDay(lastD);
+              }
+            } else {
+              d = 0;
+              setDay(0);
+            }
+            publish(y, mo, d);
           }}
         >
           <option value="">Year</option>
@@ -306,7 +330,23 @@ function DobField({
           disabled={!year}
           onChange={(e) => {
             const mo = Number(e.target.value) || 0;
-            commit(year, mo, day);
+            setMonth(mo);
+            let d = day;
+            if (!mo) {
+              setDay(0);
+              onChange('');
+              return;
+            }
+            if (d) {
+              const lastD = daysInMonth(year, mo);
+              const capped =
+                year === maxY && mo === maxMo ? Math.min(lastD, maxD) : lastD;
+              if (d > capped) {
+                d = capped;
+                setDay(capped);
+              }
+            }
+            publish(year, mo, d);
           }}
         >
           <option value="">Month</option>
@@ -323,7 +363,12 @@ function DobField({
           disabled={!year || !month}
           onChange={(e) => {
             const d = Number(e.target.value) || 0;
-            commit(year, month, d);
+            setDay(d);
+            if (!d) {
+              onChange('');
+              return;
+            }
+            publish(year, month, d);
           }}
         >
           <option value="">Day</option>
@@ -335,12 +380,15 @@ function DobField({
         </select>
       </div>
       <div className={styles.dobHint}>
-        {value ? (
+        {year && month && day && value ? (
           <>
             Selected: <b>{formatDobDisplay(value)}</b>
           </>
         ) : (
-          <>Select year first (default suggestion: {defaultDobYear(minYear)})</>
+          <>
+            Select year → month → day
+            {!year ? ` (suggested year: ${defaultDobYear(minYear)})` : ''}
+          </>
         )}
       </div>
     </div>
@@ -1032,6 +1080,7 @@ function RegisterInner() {
                                 {labelFor(fname)} {star}
                               </label>
                               <DobField
+                                key={`dob-${i}-${fname}-${category}-${teamSize}`}
                                 value={p[fname] || ''}
                                 minYear={catRules.minYear}
                                 error={err}
